@@ -1,2 +1,5 @@
 .spectra/
 openspec/.vector-search.db*
+
+# Build artifacts
+/es-log
