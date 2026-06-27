@@ -41,6 +41,37 @@ type TLS struct {
 	InsecureSkipVerify bool   `yaml:"insecure-skip-verify" json:"insecure-skip-verify,omitempty"`
 }
 
+// TemplateYAML is the canonical commented configuration template. It is the
+// single source shared by `config init` (printed verbatim to stdout) and the
+// `config` command help text, so the two can never drift. It parses cleanly into
+// Config: the apikey context's api-key and the basic context's password both
+// survive as ${...} references, proving the file keys align with the struct tags.
+const TemplateYAML = `# es-log configuration — a flat list of contexts (no current-context).
+# Secrets may reference environment variables with ${VAR}, expanded only when a
+# connection is actually made. Recommended file mode: 0600.
+contexts:
+  # API key authentication.
+  - name: prod
+    server: https://es-prod.example.com:9200
+    auth:
+      type: apikey
+      api-key: ${ES_PROD_API_KEY}
+    tls:
+      ca-cert: /etc/es/ca.pem
+      # Leave false; setting true disables TLS certificate verification (MITM risk).
+      insecure-skip-verify: false
+
+  # Basic (username/password) authentication.
+  - name: staging
+    server: https://es-staging.example.com:9200
+    auth:
+      type: basic
+      username: elastic
+      password: ${ES_STAGING_PASSWORD}
+    tls:
+      insecure-skip-verify: false
+`
+
 // Load reads and parses the configuration file at path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)

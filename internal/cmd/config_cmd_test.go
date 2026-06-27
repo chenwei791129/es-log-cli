@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/chenwei791129/es-log-cli/internal/config"
 )
 
 func writeMultiContextConfig(t *testing.T, body string) string {
@@ -122,5 +124,112 @@ func TestContextResolution(t *testing.T) {
 	res = runCLI(t, context.Background(), "ls", "-c", "test", "--config", cfg)
 	if res.code != 0 {
 		t.Errorf("flag precedence: exit %d (%s)", res.code, res.stderr)
+	}
+}
+
+// isEnvRef reports whether s is a ${VAR} reference.
+func isEnvRef(s string) bool {
+	return strings.HasPrefix(s, "${") && strings.HasSuffix(s, "}")
+}
+
+// TestConfigInitTemplateLoads asserts `config init` exits 0 and prints a template
+// that loads through the config loader with both auth contexts populated at the
+// field level — catching a key typo that would silently drop a field (task 3.1a).
+func TestConfigInitTemplateLoads(t *testing.T) {
+	res := runCLI(t, context.Background(), "config", "init")
+	if res.code != 0 {
+		t.Fatalf("exit %d: %s", res.code, res.stderr)
+	}
+	cfg, err := config.Load(writeMultiContextConfig(t, res.stdout))
+	if err != nil {
+		t.Fatalf("template does not load: %v", err)
+	}
+	var apikey, basic *config.Context
+	for i := range cfg.Contexts {
+		switch cfg.Contexts[i].Auth.Type {
+		case "apikey":
+			apikey = &cfg.Contexts[i]
+		case "basic":
+			basic = &cfg.Contexts[i]
+		}
+	}
+	if apikey == nil {
+		t.Fatal("template has no apikey context")
+	}
+	if !isEnvRef(apikey.Auth.APIKey) {
+		t.Errorf("apikey api-key is not a ${...} ref: %q", apikey.Auth.APIKey)
+	}
+	if basic == nil {
+		t.Fatal("template has no basic context")
+	}
+	if !isEnvRef(basic.Auth.Password) {
+		t.Errorf("basic password is not a ${...} ref: %q", basic.Auth.Password)
+	}
+}
+
+// TestConfigInitWritesNothing asserts `config init` reads and creates no file,
+// succeeding even when the resolved --config path does not exist (task 3.1b).
+func TestConfigInitWritesNothing(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent", "config.yaml")
+	res := runCLI(t, context.Background(), "config", "init", "--config", missing)
+	if res.code != 0 {
+		t.Fatalf("exit %d: %s", res.code, res.stderr)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Errorf("config init created %q (stat err=%v)", missing, err)
+	}
+	if _, err := os.Stat(filepath.Dir(missing)); !os.IsNotExist(err) {
+		t.Errorf("config init created parent dir %q", filepath.Dir(missing))
+	}
+
+	// With no --config, it must also leave the default-resolved path untouched.
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("ES_LOG_CONFIG", "")
+	_ = os.Unsetenv("ES_LOG_CONFIG")
+	if res := runCLI(t, context.Background(), "config", "init"); res.code != 0 {
+		t.Fatalf("default-path init exit %d: %s", res.code, res.stderr)
+	}
+	defaultPath := filepath.Join(xdg, "es-log", "config.yaml")
+	if _, err := os.Stat(defaultPath); !os.IsNotExist(err) {
+		t.Errorf("config init wrote default path %q", defaultPath)
+	}
+}
+
+// TestConfigInitOutputFlag asserts -o is validated like every other subcommand
+// (bogus -> exit 2, matching `config view`) while a valid value leaves the fixed
+// template byte-for-byte unchanged (task 3.1c).
+func TestConfigInitOutputFlag(t *testing.T) {
+	bogus := runCLI(t, context.Background(), "config", "init", "-o", "bogus")
+	if bogus.code != 2 {
+		t.Errorf("bogus -o: exit %d, want 2 (%s)", bogus.code, bogus.stderr)
+	}
+	viewBogus := runCLI(t, context.Background(), "config", "view", "-o", "bogus",
+		"--config", writeMultiContextConfig(t, twoContexts))
+	if viewBogus.code != bogus.code {
+		t.Errorf("init/view diverge on bogus -o: %d vs %d", bogus.code, viewBogus.code)
+	}
+
+	// Both the default output and -o json must emit the canonical template
+	// verbatim — pinning the actual bytes, not merely asserting they equal each
+	// other (which a fixed writer satisfies trivially).
+	plain := runCLI(t, context.Background(), "config", "init")
+	if plain.stdout != config.TemplateYAML {
+		t.Errorf("default output is not the canonical template:\n%q", plain.stdout)
+	}
+	asJSON := runCLI(t, context.Background(), "config", "init", "-o", "json")
+	if asJSON.stdout != config.TemplateYAML {
+		t.Errorf("-o json changed the template:\n%q", asJSON.stdout)
+	}
+}
+
+// TestConfigHelpDocumentsFormat asserts `config --help` documents the default
+// path and override env, and embeds the contexts example (task 3.2).
+func TestConfigHelpDocumentsFormat(t *testing.T) {
+	res := runCLI(t, context.Background(), "config", "--help")
+	for _, want := range []string{"~/.config/es-log/config.yaml", "ES_LOG_CONFIG", "contexts:"} {
+		if !strings.Contains(res.stdout, want) {
+			t.Errorf("config --help missing %q\n%s", want, res.stdout)
+		}
 	}
 }

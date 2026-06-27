@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"io"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -9,22 +10,62 @@ import (
 	"github.com/chenwei791129/es-log-cli/internal/output"
 )
 
+// configLongPrefix is the prose part of the `config` help body; the canonical
+// template is appended verbatim so the two never drift.
+const configLongPrefix = `Inspect configuration and scaffold a starter template.
+
+es-log resolves its configuration file in this order of precedence:
+  --config <path>
+  $ES_LOG_CONFIG
+  $XDG_CONFIG_HOME/es-log/config.yaml
+  ~/.config/es-log/config.yaml
+
+Run "es-log config init" to print a starter template, then redirect it to that
+path, e.g. "es-log config init > ~/.config/es-log/config.yaml". The config is
+read-only to es-log: it is never written or modified by any subcommand.
+
+Example configuration:
+
+`
+
 // configDoc is the `config view` JSON document: the redacted contexts. The
 // config types carry json tags so they marshal directly with no parallel structs.
 type configDoc struct {
 	Contexts []config.Context `json:"contexts"`
 }
 
-// newConfigCommand builds the `config` command group (read-only inspection only;
-// there are deliberately no write/use/delete subcommands).
+// newConfigCommand builds the `config` command group. It inspects configuration
+// and can scaffold a template, but it never writes existing config: there are
+// deliberately no set/use/delete subcommands and `init` only prints to stdout.
 func newConfigCommand(opts *globalOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Inspect configuration (read-only)",
+		Short: "Inspect configuration and scaffold a template",
+		Long:  configLongPrefix + config.TemplateYAML,
 		Args:  cobra.NoArgs,
 	}
-	cmd.AddCommand(newGetContextsCommand(opts), newConfigViewCommand(opts))
+	cmd.AddCommand(newGetContextsCommand(opts), newConfigViewCommand(opts), newConfigInitCommand(opts))
 	return cmd
+}
+
+// newConfigInitCommand prints the canonical config template to stdout. It is a
+// pure generator: it reads no file, writes no file, creates no directory, and
+// registers no writing flag. It still validates -o through the shared formatFor
+// path (an invalid value exits 2, matching every other subcommand) but ignores
+// the validated value, since the template is fixed text regardless of format.
+func newConfigInitCommand(opts *globalOptions) *cobra.Command {
+	return &cobra.Command{
+		Use:   "init",
+		Short: "Print a commented config template to stdout",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if _, err := opts.formatFor("config"); err != nil {
+				return err
+			}
+			_, err := io.WriteString(cmd.OutOrStdout(), config.TemplateYAML)
+			return err
+		},
+	}
 }
 
 // newGetContextsCommand lists the names of all configured contexts. It does not
