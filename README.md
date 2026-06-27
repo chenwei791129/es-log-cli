@@ -42,6 +42,11 @@ The file is a flat list of contexts (no `current-context`). Secrets may referenc
 environment variables with `${VAR}`, expanded only when a connection is made.
 Recommended file mode: `0600`.
 
+Run `es-log config init` to print the canonical, commented template — the
+authoritative source for the file format — and redirect it into place, e.g.
+`es-log config init > ~/.config/es-log/config.yaml`. The snippet below is a
+condensed, human-readable version of that template.
+
 ```yaml
 contexts:
   - name: prod
