@@ -1,0 +1,13 @@
+## 1. 實作 --show-hidden 與預設隱藏過濾
+
+- [x] 1.1 實作 requirement「Hide dot-prefixed targets by default」的旗標部分:在 `internal/cmd/ls.go` 的 `newLsCommand` 內宣告 `var showHidden bool`,以 `cmd.PersistentFlags().BoolVar(&showHidden, "show-hidden", false, ...)` 註冊在 `ls` 命令上(persistent flag,讓 `aliases` / `datastreams` 子命令繼承)。`ls`、`aliases`、`datastreams` 三個 `RunE` 閉包皆定義於 `newLsCommand` 內,直接捕捉 `showHidden` 並將其值傳入 `runLs`(見 1.2,`runLs` 簽章新增一個 `showHidden bool` 參數)。完成時:`es-log ls --help`、`es-log ls aliases --help`、`es-log ls datastreams --help` 三者皆顯示 `--show-hidden` 旗標(預設 false),證明 persistent flag 被子命令繼承。
+- [x] 1.2 實作 requirement「Hide dot-prefixed targets by default」的過濾部分:將 `runLs` 簽章由 `runLs(cmd, opts, mode)` 改為 `runLs(cmd, opts, mode, showHidden)`。在 `runLs` 內,`collectTargets` 回傳 rows 之後、`renderLs` 之前套用過濾:當 `showHidden` 為 `false` 時,剔除 `Name` 以 `.` 開頭的 row(alias 與 datastream 同一規則);為 `true` 時不過濾。過濾在 render 前進行,使 table / json / jsonl 對同一旗標值輸出相同的 target 集合。`collectTargets` 的簽章 `(ctx, client, mode)` 與 `internal/esclient`(`ListAliases` / `ListDataStreams`)皆不得改動,維持純唯讀抓取;`search` 命令不在此過濾範圍內。隱藏判定僅依名稱前綴 `.`,不讀取 Elasticsearch 的 `index.hidden` setting。完成時:對含 `.kibana`(alias)、`app-logs`(alias)、`.items-default`(datastream)、`metrics`(datastream) 的叢集,`es-log ls` 只輸出 `app-logs` 與 `metrics`,而 `es-log ls --show-hidden` 輸出全部四個。
+
+## 2. 測試
+
+- [x] 2.1 驗證 requirement「Hide dot-prefixed targets by default」:在 `internal/cmd/ls_test.go` 新增一個**獨立的** stub fixture(不沿用既有的 `lsStub` / `aliasBody` / `dataStreamBody`,以免既有以 row count 斷言的 `TestLsCombined` / `TestLsAliasesOnly` / `TestLsDatastreamsOnly` 與本測試共用 fixture 而相互牽動),其 `/_alias` 與 `/_data_stream` 回應同時含 dot-prefixed 與一般名稱(例如 alias `.kibana` + `app-logs`、datastream `.items-default` + `metrics`)。新增行為測試(僅測本 repo 的過濾邏輯):(a) 預設 `ls` 的輸出不含任何 dot-prefixed alias 或 datastream,且含一般名稱;(b) `ls --show-hidden` 的輸出含 dot-prefixed 項;(c) `ls datastreams` 預設排除 dot-prefixed、加 `--show-hidden` 後還原(驗證子命令繼承 persistent flag);(d) 當所有 alias 皆 dot-prefixed 時,`ls aliases` exit 0 且 row 清單為空,加 `--show-hidden` 後列出那些 alias;(e) 以 `-o table` 與 `-o json` 兩格式在同一旗標值下解析輸出,斷言列出的 target 名稱集合相同。所有斷言以輸出內容(名稱集合)為準,不依賴原始碼行號。
+- [x] 2.2 確認既有 ls 測試不被預設行為變更破壞:`TestLsCombined`(期望 3 row)、`TestLsAliasesOnly`(期望 2 row)、`TestLsDatastreamsOnly`(期望 1 row)、`TestLsCountFields`、`TestLsJSONArray` 所用的共用 fixture(`aliasBody` / `dataStreamBody`)目前皆為 dot-free,套用預設過濾後不應被剔除。完成時:`go test ./internal/cmd/` 全綠,既有五個 Ls 測試的斷言維持原值不需改動;若日後有人需在共用 fixture 加入 dot 名稱,應改用 `--show-hidden` 或本變更新增的獨立 fixture。
+
+## 3. 驗證
+
+- [x] 3.1 跑 `make test`、`make lint`、`make fmt` 全綠;`make build` 後執行 `./es-log ls --help`,確認輸出含 `--show-hidden` 旗標且標示預設為 false。
