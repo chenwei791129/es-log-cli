@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -30,21 +31,25 @@ const (
 // newLsCommand builds the `ls` command (combined view) with `aliases` and
 // `datastreams` subcommands that filter by type.
 func newLsCommand(opts *globalOptions) *cobra.Command {
+	var showHidden bool
 	cmd := &cobra.Command{
 		Use:   "ls",
 		Short: "List aliases and datastreams",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runLs(cmd, opts, listAll)
+			return runLs(cmd, opts, listAll, showHidden)
 		},
 	}
+	// Persistent flag so `aliases` and `datastreams` subcommands inherit it.
+	cmd.PersistentFlags().BoolVar(&showHidden, "show-hidden", false,
+		"include targets whose name begins with a dot (hidden by default)")
 	cmd.AddCommand(
 		&cobra.Command{
 			Use:   "aliases",
 			Short: "List aliases only",
 			Args:  cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				return runLs(cmd, opts, listAliases)
+				return runLs(cmd, opts, listAliases, showHidden)
 			},
 		},
 		&cobra.Command{
@@ -52,15 +57,17 @@ func newLsCommand(opts *globalOptions) *cobra.Command {
 			Short: "List datastreams only",
 			Args:  cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				return runLs(cmd, opts, listDataStreams)
+				return runLs(cmd, opts, listDataStreams, showHidden)
 			},
 		},
 	)
 	return cmd
 }
 
-// runLs fetches and renders targets filtered by mode.
-func runLs(cmd *cobra.Command, opts *globalOptions, mode string) error {
+// runLs fetches and renders targets filtered by mode. Unless showHidden is set,
+// targets whose name begins with a dot are dropped before rendering so all output
+// formats list an identical target set for the same flag value.
+func runLs(cmd *cobra.Command, opts *globalOptions, mode string, showHidden bool) error {
 	cfg, err := opts.loadConfig()
 	if err != nil {
 		return err
@@ -78,7 +85,23 @@ func runLs(cmd *cobra.Command, opts *globalOptions, mode string) error {
 	if err != nil {
 		return classifyESError("", err)
 	}
+	if !showHidden {
+		rows = filterHidden(rows)
+	}
 	return renderLs(cmd, format, rows)
+}
+
+// filterHidden drops rows whose name begins with a dot (Elasticsearch's
+// convention for system/hidden objects).
+func filterHidden(rows []lsRow) []lsRow {
+	filtered := rows[:0]
+	for _, r := range rows {
+		if strings.HasPrefix(r.Name, ".") {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	return filtered
 }
 
 // collectTargets gathers alias and/or datastream rows according to mode.

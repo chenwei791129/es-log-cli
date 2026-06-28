@@ -3,6 +3,9 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -13,6 +16,132 @@ const (
 	}`
 	dataStreamBody = `{"data_streams":[{"name":"metrics","indices":[{},{},{}]}]}`
 )
+
+// Independent fixtures for the --show-hidden behavior tests. Kept separate from
+// aliasBody / dataStreamBody so the row-count assertions in TestLsCombined etc.
+// are not coupled to these dot-prefixed entries.
+const (
+	hiddenAliasBody = `{
+		"idx-k":{"aliases":{".kibana":{}}},
+		"idx-a":{"aliases":{"app-logs":{}}}
+	}`
+	hiddenDataStreamBody = `{"data_streams":[{"name":".items-default","indices":[{}]},{"name":"metrics","indices":[{},{},{}]}]}`
+	// allHiddenAliasBody exposes only dot-prefixed aliases for the empty-result scenario.
+	allHiddenAliasBody  = `{"idx-1":{"aliases":{".kibana":{},".security":{}}}}`
+	emptyDataStreamBody = `{"data_streams":[]}`
+)
+
+// hiddenStub serves the provided alias and data_stream bodies.
+func hiddenStub(t *testing.T, aliasResp, dsResp string) *esStub {
+	return newESStub(t, func(r recordedReq) (int, string) {
+		switch r.path {
+		case "/_alias":
+			return 200, aliasResp
+		case "/_data_stream":
+			return 200, dsResp
+		default:
+			return 404, `{}`
+		}
+	})
+}
+
+// rowNames extracts the Name column from decoded rows.
+func rowNames(rows []lsRow) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Name)
+	}
+	return out
+}
+
+// sameNameSet reports whether a and b contain the same names regardless of order.
+func sameNameSet(a, b []string) bool {
+	ac := slices.Clone(a)
+	bc := slices.Clone(b)
+	sort.Strings(ac)
+	sort.Strings(bc)
+	return slices.Equal(ac, bc)
+}
+
+// lsTableNames runs `ls <args>` with table output and returns the NAME column.
+func lsTableNames(t *testing.T, stub *esStub, args ...string) []string {
+	t.Helper()
+	res := lsRun(t, stub, "table", args...)
+	var names []string
+	for i, line := range strings.Split(strings.TrimRight(res.stdout, "\n"), "\n") {
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue // skip header and blank lines
+		}
+		names = append(names, strings.Fields(line)[0])
+	}
+	return names
+}
+
+// TestLsHidesDotPrefixedByDefault covers scenario "Dot-prefixed targets hidden by default".
+func TestLsHidesDotPrefixedByDefault(t *testing.T) {
+	got := rowNames(lsRows(t, hiddenStub(t, hiddenAliasBody, hiddenDataStreamBody)))
+	for _, n := range got {
+		if strings.HasPrefix(n, ".") {
+			t.Errorf("dot-prefixed target leaked into default ls: %q (all: %v)", n, got)
+		}
+	}
+	if !slices.Contains(got, "app-logs") || !slices.Contains(got, "metrics") {
+		t.Errorf("default ls dropped a regular target: %v", got)
+	}
+}
+
+// TestLsShowHiddenIncludesDotPrefixed covers scenario "--show-hidden includes dot-prefixed targets".
+func TestLsShowHiddenIncludesDotPrefixed(t *testing.T) {
+	got := rowNames(lsRows(t, hiddenStub(t, hiddenAliasBody, hiddenDataStreamBody), "--show-hidden"))
+	for _, want := range []string{".kibana", "app-logs", ".items-default", "metrics"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("--show-hidden output missing %q: %v", want, got)
+		}
+	}
+}
+
+// TestLsDatastreamsSubcommandInheritsFlag covers scenario "Subcommands inherit the flag and the default".
+func TestLsDatastreamsSubcommandInheritsFlag(t *testing.T) {
+	stub := hiddenStub(t, hiddenAliasBody, hiddenDataStreamBody)
+	def := rowNames(lsRows(t, stub, "datastreams"))
+	if slices.Contains(def, ".items-default") || !slices.Contains(def, "metrics") {
+		t.Errorf("default ls datastreams wrong: %v", def)
+	}
+	all := rowNames(lsRows(t, stub, "datastreams", "--show-hidden"))
+	if !slices.Contains(all, ".items-default") {
+		t.Errorf("ls datastreams --show-hidden missing .items-default: %v", all)
+	}
+}
+
+// TestLsAllHiddenAliasesEmptyNotError covers scenario "All-hidden listing yields an empty result, not an error".
+func TestLsAllHiddenAliasesEmptyNotError(t *testing.T) {
+	stub := hiddenStub(t, allHiddenAliasBody, emptyDataStreamBody)
+	def := lsRows(t, stub, "aliases")
+	if len(def) != 0 {
+		t.Errorf("want empty rows when all aliases hidden, got %v", rowNames(def))
+	}
+	all := rowNames(lsRows(t, stub, "aliases", "--show-hidden"))
+	if !slices.Contains(all, ".kibana") || !slices.Contains(all, ".security") {
+		t.Errorf("ls aliases --show-hidden should list hidden aliases: %v", all)
+	}
+}
+
+// TestLsFormatsListIdenticalTargets covers scenario where table and json list the same targets per flag value.
+func TestLsFormatsListIdenticalTargets(t *testing.T) {
+	for _, args := range [][]string{nil, {"--show-hidden"}} {
+		stub := hiddenStub(t, hiddenAliasBody, hiddenDataStreamBody)
+		jsonNames := rowNames(lsRows(t, stub, args...))
+		tableNames := lsTableNames(t, stub, args...)
+		// Anchor on a known non-empty set so an over-filtering regression that
+		// empties both formats can't satisfy the parity check vacuously.
+		if !slices.Contains(jsonNames, "app-logs") || !slices.Contains(jsonNames, "metrics") {
+			t.Errorf("expected regular targets present for args %v: %v", args, jsonNames)
+		}
+		if !sameNameSet(jsonNames, tableNames) {
+			t.Errorf("table/json target sets differ for args %v: json=%v table=%v", args, jsonNames, tableNames)
+		}
+	}
+}
 
 func lsStub(t *testing.T) *esStub {
 	return newESStub(t, func(r recordedReq) (int, string) {
@@ -27,16 +156,24 @@ func lsStub(t *testing.T) *esStub {
 	})
 }
 
-// lsRows runs `ls <args>` with json output and decodes the row array.
-func lsRows(t *testing.T, stub *esStub, args ...string) []lsRow {
+// lsRun executes `ls <args>` against stub with the given output format and
+// returns the captured result, failing on a non-zero exit code.
+func lsRun(t *testing.T, stub *esStub, format string, args ...string) cliResult {
 	t.Helper()
 	cfg := writeTestConfig(t, stub.url())
 	full := append([]string{"ls"}, args...)
-	full = append(full, "-c", "test", "-o", "json", "--config", cfg)
+	full = append(full, "-c", "test", "-o", format, "--config", cfg)
 	res := runCLI(t, context.Background(), full...)
 	if res.code != 0 {
 		t.Fatalf("ls exit %d: %s", res.code, res.stderr)
 	}
+	return res
+}
+
+// lsRows runs `ls <args>` with json output and decodes the row array.
+func lsRows(t *testing.T, stub *esStub, args ...string) []lsRow {
+	t.Helper()
+	res := lsRun(t, stub, "json", args...)
 	var rows []lsRow
 	if err := json.Unmarshal([]byte(res.stdout), &rows); err != nil {
 		t.Fatalf("ls output not a JSON array: %v\n%s", err, res.stdout)
