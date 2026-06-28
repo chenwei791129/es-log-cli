@@ -26,12 +26,31 @@ Designed for AI agents first, humans and CI second. Supports Elasticsearch 8.x+.
 
 ## Installation
 
-Requires Go 1.25+.
+Download the pre-built binary for your platform from the
+[latest release](https://github.com/chenwei791129/es-log-cli/releases/latest).
+No Go toolchain required — each binary is a CGO-free static executable.
 
 ```bash
-make build          # produces a CGO-free static ./es-log binary
-mv es-log /usr/local/bin/   # put it on your PATH
+# Pick the asset matching your OS/arch:
+#   es-log-linux-amd64   es-log-linux-arm64
+#   es-log-darwin-amd64  es-log-darwin-arm64
+
+# Example: Linux x86_64
+curl -L -o es-log \
+  https://github.com/chenwei791129/es-log-cli/releases/latest/download/es-log-linux-amd64
+chmod +x es-log
+sudo mv es-log /usr/local/bin/   # put it on your PATH
+
+# macOS Apple Silicon
+curl -L -o es-log \
+  https://github.com/chenwei791129/es-log-cli/releases/latest/download/es-log-darwin-arm64
+chmod +x es-log
+sudo mv es-log /usr/local/bin/
 ```
+
+Verify the install with `es-log version`.
+
+Building from source instead is covered under [Development](#development).
 
 ## Configuration
 
@@ -132,13 +151,15 @@ Errors go to stderr as plain text; stdout never contains partial output on failu
 
 ## Development
 
+Requires Go 1.25+. To build from source instead of downloading a release binary:
+
 ```bash
+make build    # produces a CGO-free static ./es-log binary
 make test     # run the test suite
 make lint     # golangci-lint (pinned as a go tool dependency)
 make fmt      # gofmt
-make build    # static binary
 ```
 
 ## License
 
-MIT License.
+Released under the MIT License — see [LICENSE](LICENSE) for the full text.
