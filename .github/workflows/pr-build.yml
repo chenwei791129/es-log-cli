@@ -29,7 +29,8 @@ jobs:
           go-version-file: go.mod
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
-          CGO_ENABLED: 0
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -o /dev/null ./cmd/es-log
+        # Delegate to `make build` so the PR compile-check exercises the same
+        # build contract (CGO_ENABLED=0, -trimpath, ldflags) used to ship.
+        run: make build BINARY=/dev/null

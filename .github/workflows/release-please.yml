@@ -9,6 +9,12 @@ permissions:
   pull-requests: write
   issues: write
 
+# Serialize release runs so rapid pushes to main cannot spawn overlapping
+# release-please runs or racing asset uploads against the same tag.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release-please:
     runs-on: ubuntu-latest
@@ -47,14 +53,16 @@ jobs:
           go-version-file: go.mod
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
-          CGO_ENABLED: 0
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+        # Delegate to `make build` so release binaries match the canonical
+        # build contract (CGO_ENABLED=0, -trimpath, ldflags). The tag_name is
+        # passed explicitly because the shallow checkout has no tags for
+        # `git describe` to resolve.
         run: |
-          go build \
-            -ldflags "-s -w -X github.com/chenwei791129/es-log-cli/internal/cmd.version=${{ needs.release-please.outputs.tag_name }}" \
-            -o es-log-${{ matrix.goos }}-${{ matrix.goarch }} \
-            ./cmd/es-log
+          make build \
+            BINARY=es-log-${{ matrix.goos }}-${{ matrix.goarch }} \
+            VERSION=${{ needs.release-please.outputs.tag_name }}
       - name: Upload asset to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
