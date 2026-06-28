@@ -28,7 +28,8 @@ Designed for AI agents first, humans and CI second. Supports Elasticsearch 8.x+.
 
 Download the pre-built binary for your platform from the
 [latest release](https://github.com/chenwei791129/es-log-cli/releases/latest).
-No Go toolchain required — each binary is a CGO-free static executable.
+No Go toolchain required — each binary is built CGO-free (the Linux builds are
+fully static; the macOS builds still link the system libraries, as Go requires).
 
 ```bash
 # Pick the asset matching your OS/arch:
@@ -36,13 +37,13 @@ No Go toolchain required — each binary is a CGO-free static executable.
 #   es-log-darwin-amd64  es-log-darwin-arm64
 
 # Example: Linux x86_64
-curl -L -o es-log \
+curl -fL -o es-log \
   https://github.com/chenwei791129/es-log-cli/releases/latest/download/es-log-linux-amd64
 chmod +x es-log
 sudo mv es-log /usr/local/bin/   # put it on your PATH
 
 # macOS Apple Silicon
-curl -L -o es-log \
+curl -fL -o es-log \
   https://github.com/chenwei791129/es-log-cli/releases/latest/download/es-log-darwin-arm64
 chmod +x es-log
 sudo mv es-log /usr/local/bin/
