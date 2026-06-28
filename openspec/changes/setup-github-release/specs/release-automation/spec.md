@@ -1,16 +1,22 @@
 ## ADDED Requirements
 
-### Requirement: Test workflow on non-main pushes
+### Requirement: Test workflow on non-main pushes and PRs to main
 
 The repository SHALL run the Go test suite via GitHub Actions on every push to
-any branch other than `main`, so regressions are caught before a pull request is
-opened.
+any branch other than `main`, and on every pull request targeting `main`, so
+regressions are caught before a pull request is opened and again before it is
+merged.
 
 #### Scenario: Push to a feature branch triggers tests
 
 - **WHEN** a commit is pushed to any branch whose name is not `main`
 - **THEN** a workflow checks out the code, sets up Go using `go-version-file: go.mod`, and runs `go test ./...`
 - **AND** the workflow does NOT run for pushes to `main`
+
+#### Scenario: Pull request to main triggers tests
+
+- **WHEN** a pull request targeting `main` is opened or updated
+- **THEN** the same workflow checks out the code, sets up Go using `go-version-file: go.mod`, and runs `go test ./...`, so `go test` gates the merge into `main`
 
 ### Requirement: Pull request cross-platform build validation
 
