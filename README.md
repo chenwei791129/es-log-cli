@@ -178,8 +178,24 @@ prefer `-o json` for nested `--aggs` results).
 | 2 | Argument/config error (missing context, conflicting time flags, missing target, unset secret variable, conflicting or malformed aggregation flags) |
 | 3 | Connection or authentication failure |
 | 4 | Target not found (ES 404 `index_not_found`) |
+| 5 | Incomplete results (partial shard failure) |
 
-Errors go to stderr as plain text; stdout never contains partial output on failure.
+Errors go to stderr as plain text. On a hard failure (exit 2/3/4) stdout never
+contains result output. When a query fails with a non-2xx response, the stderr
+message includes the `error.type` and the deepest available root-cause reason:
+
+```text
+error: elasticsearch error (HTTP 400: search_phase_execution_exception — Fielddata is disabled on [some_field])
+```
+
+Exit code `5` is different: the cluster responded `200 OK` but reported failed
+shards, so the results are incomplete. The partial results are still written to
+stdout, while a diagnostic naming the failed-shard count and reason goes to
+stderr — check the exit code before trusting the output in a script:
+
+```text
+error: incomplete results: 2 of 5 shards failed (Fielddata is disabled on [some_field])
+```
 
 ## Development
 
