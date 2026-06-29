@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0](https://github.com/chenwei791129/es-log-cli/compare/v1.1.0...v1.2.0) (2026-06-29)
+
+
+### Features
+
+* add es-log fields command for mapping inspection ([f39b7f3](https://github.com/chenwei791129/es-log-cli/commit/f39b7f3d509e750f6dfd7c3e2ddd5c47c96768b9))
+* surface ES root-cause reasons and partial shard failures ([6d7d723](https://github.com/chenwei791129/es-log-cli/commit/6d7d72397aa1a6603f88a27b91dcc0bbf6745f66))
+
 ## [1.1.0](https://github.com/chenwei791129/es-log-cli/compare/v1.0.0...v1.1.0) (2026-06-29)
 
 
