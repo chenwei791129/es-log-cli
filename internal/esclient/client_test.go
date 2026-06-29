@@ -256,10 +256,119 @@ func TestSearch404IsAPIError(t *testing.T) {
 	}
 }
 
+// fieldByName returns the FieldType with the given name from a GetMapping result,
+// failing the test when it is absent.
+func fieldByName(t *testing.T, fields []FieldType, name string) FieldType {
+	t.Helper()
+	for _, f := range fields {
+		if f.Name == name {
+			return f
+		}
+	}
+	t.Fatalf("field %q not found in %+v", name, fields)
+	return FieldType{}
+}
+
+// TestGetMappingFlattensSingleIndex asserts a single-index mapping is flattened:
+// nested objects become dotted paths, multi-fields become separate entries, an
+// object without sub-properties is typed "object", no intermediate object node is
+// emitted, and entries are ordered by field path.
+func TestGetMappingFlattensSingleIndex(t *testing.T) {
+	var reqs []captured
+	body := `{"idx-1":{"mappings":{"properties":{` +
+		`"user":{"properties":{"id":{"type":"keyword"}}},` +
+		`"message":{"type":"text","fields":{"keyword":{"type":"keyword"}}},` +
+		`"host":{}` +
+		`}}}}`
+	srv := newStub(t, 200, body, &reqs)
+	defer srv.Close()
+
+	fields, err := newClient(t, srv.URL, AuthConfig{}).GetMapping(context.Background(), "app-logs")
+	if err != nil {
+		t.Fatalf("GetMapping: %v", err)
+	}
+	if reqs[0].method != http.MethodGet || reqs[0].path != "/app-logs/_mapping" {
+		t.Errorf("got %s %s, want GET /app-logs/_mapping", reqs[0].method, reqs[0].path)
+	}
+
+	// Entries ordered by field path, with no intermediate "user" object node.
+	gotNames := make([]string, len(fields))
+	for i, f := range fields {
+		gotNames[i] = f.Name
+	}
+	wantNames := []string{"host", "message", "message.keyword", "user.id"}
+	if !reflect.DeepEqual(gotNames, wantNames) {
+		t.Fatalf("field names = %v, want %v", gotNames, wantNames)
+	}
+
+	cases := map[string]string{
+		"user.id":         "keyword",
+		"message":         "text",
+		"message.keyword": "keyword",
+		"host":            "object",
+	}
+	for name, wantType := range cases {
+		f := fieldByName(t, fields, name)
+		if !reflect.DeepEqual(f.Types, []string{wantType}) {
+			t.Errorf("%s types = %v, want [%s]", name, f.Types, wantType)
+		}
+		if f.ByIndex != nil {
+			t.Errorf("%s should have no per-index breakdown: %v", name, f.ByIndex)
+		}
+	}
+}
+
+// TestGetMappingConsistentAcrossIndices asserts a field with the same type in
+// every index has a single-element type set and no per-index breakdown.
+func TestGetMappingConsistentAcrossIndices(t *testing.T) {
+	body := `{` +
+		`"idx-1":{"mappings":{"properties":{"@timestamp":{"type":"date"}}}},` +
+		`"idx-2":{"mappings":{"properties":{"@timestamp":{"type":"date"}}}}` +
+		`}`
+	srv := newStub(t, 200, body, &[]captured{})
+	defer srv.Close()
+
+	fields, err := newClient(t, srv.URL, AuthConfig{}).GetMapping(context.Background(), "app-logs")
+	if err != nil {
+		t.Fatalf("GetMapping: %v", err)
+	}
+	f := fieldByName(t, fields, "@timestamp")
+	if !reflect.DeepEqual(f.Types, []string{"date"}) {
+		t.Errorf("@timestamp types = %v, want [date]", f.Types)
+	}
+	if f.ByIndex != nil {
+		t.Errorf("consistent field should have no per-index breakdown: %v", f.ByIndex)
+	}
+}
+
+// TestGetMappingTypeConflict asserts a field with divergent types across indices
+// carries a sorted distinct type set of size >= 2 and a per-index breakdown.
+func TestGetMappingTypeConflict(t *testing.T) {
+	body := `{` +
+		`"app-logs":{"mappings":{"properties":{"tags":{"type":"text"}}}},` +
+		`"web-logs":{"mappings":{"properties":{"tags":{"type":"keyword"}}}}` +
+		`}`
+	srv := newStub(t, 200, body, &[]captured{})
+	defer srv.Close()
+
+	fields, err := newClient(t, srv.URL, AuthConfig{}).GetMapping(context.Background(), "app-logs,web-logs")
+	if err != nil {
+		t.Fatalf("GetMapping: %v", err)
+	}
+	f := fieldByName(t, fields, "tags")
+	if !reflect.DeepEqual(f.Types, []string{"keyword", "text"}) {
+		t.Errorf("tags types = %v, want [keyword text] sorted ascending", f.Types)
+	}
+	want := map[string]string{"app-logs": "text", "web-logs": "keyword"}
+	if !reflect.DeepEqual(f.ByIndex, want) {
+		t.Errorf("tags ByIndex = %v, want %v", f.ByIndex, want)
+	}
+}
+
 // TestReadOnlyWhitelistLock enumerates the client's exported methods and asserts
 // the set is exactly the read-only whitelist with no generic request method.
 func TestReadOnlyWhitelistLock(t *testing.T) {
-	want := []string{"GetMaxResultWindow", "ListAliases", "ListDataStreams", "Ping", "Search"}
+	want := []string{"GetMapping", "GetMaxResultWindow", "ListAliases", "ListDataStreams", "Ping", "Search"}
 
 	var got []string
 	ct := reflect.TypeFor[*Client]()
@@ -275,6 +384,51 @@ func TestReadOnlyWhitelistLock(t *testing.T) {
 		if _, ok := ct.MethodByName(forbidden); ok {
 			t.Errorf("forbidden generic method %q is exported", forbidden)
 		}
+	}
+}
+
+// TestOnlyWhitelistedRequestsIssued drives every client operation against a
+// recording server and asserts each captured request matches one of the
+// whitelisted verb/path templates (including GET /<target>/_mapping) and that no
+// write or maintenance verb is ever issued.
+func TestOnlyWhitelistedRequestsIssued(t *testing.T) {
+	var reqs []captured
+	srv := newStub(t, 200, `{}`, &reqs)
+	defer srv.Close()
+
+	c := newClient(t, srv.URL, AuthConfig{})
+	ctx := context.Background()
+	_ = c.Ping(ctx)
+	_, _ = c.ListAliases(ctx)
+	_, _ = c.ListDataStreams(ctx)
+	_, _, _ = c.GetMaxResultWindow(ctx, "app-logs")
+	_, _ = c.GetMapping(ctx, "app-logs")
+	_, _ = c.Search(ctx, "app-logs", []byte(`{}`))
+
+	whitelisted := func(r captured) bool {
+		switch {
+		case r.method == http.MethodGet && r.path == "/_cluster/health",
+			r.method == http.MethodGet && r.path == "/_alias",
+			r.method == http.MethodGet && r.path == "/_data_stream",
+			r.method == http.MethodGet && r.path == "/app-logs/_settings/index.max_result_window",
+			r.method == http.MethodGet && r.path == "/app-logs/_mapping",
+			r.method == http.MethodPost && r.path == "/app-logs/_search":
+			return true
+		}
+		return false
+	}
+
+	for _, r := range reqs {
+		switch r.method {
+		case http.MethodPut, http.MethodDelete, http.MethodPatch:
+			t.Errorf("write/maintenance verb issued: %s %s", r.method, r.path)
+		}
+		if !whitelisted(r) {
+			t.Errorf("non-whitelisted request issued: %s %s", r.method, r.path)
+		}
+	}
+	if len(reqs) != 6 {
+		t.Errorf("expected 6 requests (one per whitelisted method), got %d", len(reqs))
 	}
 }
 

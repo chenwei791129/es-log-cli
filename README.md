@@ -11,8 +11,8 @@ Designed for AI agents first, humans and CI second. Supports Elasticsearch 8.x+.
 ## Features
 
 - **Read-only by design** — the client exposes only `ListAliases`,
-  `ListDataStreams`, `Search`, `GetMaxResultWindow`, and `Ping`; there is no
-  generic request method that accepts an arbitrary verb or path.
+  `ListDataStreams`, `Search`, `GetMaxResultWindow`, `GetMapping`, and `Ping`;
+  there is no generic request method that accepts an arbitrary verb or path.
 - **Explicit context** — every query is bound to a context via `--context/-c` or
   `$ES_LOG_CONTEXT`. No hidden `current-context` state.
 - **Agent-friendly output** — `search` emits bare `_source` JSONL by default;
@@ -103,6 +103,10 @@ es-log -c prod ping
 es-log -c prod ls
 es-log -c prod ls datastreams -o table
 
+# Inspect a target's fields and types (default JSON; -o table for humans)
+es-log -c prod fields app-logs
+es-log -c prod fields 'app-logs,web-logs' -o table
+
 # Search: errors in the last hour (default JSONL of bare _source)
 es-log -c prod search -t app-logs -q 'level:error' --since 1h
 
@@ -140,6 +144,54 @@ fails with exit code 2 before any request. The shared `--query`/`--since`/`--fro
 defaults to `size: 0` (buckets only) unless `--size N` is given to also return hits.
 Unlike a plain search, `--size 0` in aggregation mode means no hits (the default),
 not "fetch everything".
+
+### Inspecting fields
+
+`es-log fields <target>` fetches the target's mapping and presents it as a
+flattened list of field paths and their types — useful before a query to learn
+what fields exist and to spot type divergence across a target's backing indices.
+Nested objects flatten to dotted paths (`user.id`), multi-fields become their own
+entries (`message.keyword`), and an object with no sub-properties is typed
+`object`.
+
+When a target resolves to multiple indices and the same field has more than one
+type across them, that field is a **type conflict** — the most common root cause
+of partial shard failures. The conflict is surfaced in every format so you see it
+before querying:
+
+```bash
+es-log -c prod fields 'app-logs,web-logs' -o table
+```
+
+```text
+FIELD            TYPE
+@timestamp       date
+host             object
+message          text
+message.keyword  keyword
+tags             keyword, text  ⚠ conflict
+user.id          keyword
+```
+
+The default `json` output is an array of `{"name","types","conflict"}` rows
+(`jsonl` emits one such object per line). For a conflicting field, `conflict` is
+`true` and the row additionally carries an `indices` per-index type breakdown; for
+a consistent field `conflict` is `false` and `indices` is omitted:
+
+```json
+[
+  { "name": "@timestamp", "types": ["date"], "conflict": false },
+  {
+    "name": "tags",
+    "types": ["keyword", "text"],
+    "conflict": true,
+    "indices": { "app-logs": "text", "web-logs": "keyword" }
+  }
+]
+```
+
+A field that exists in only some of the resolved indices but carries one
+consistent type is **not** marked as a conflict.
 
 ### Global flags
 

@@ -45,6 +45,7 @@ func NewRootCommand() *cobra.Command {
 		newConfigCommand(opts),
 		newLsCommand(opts),
 		newSearchCommand(opts),
+		newFieldsCommand(opts),
 		newPingCommand(opts),
 		newVersionCommand(),
 	)

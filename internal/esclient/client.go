@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -368,6 +369,113 @@ func (c *Client) GetMaxResultWindow(ctx context.Context, target string) (window 
 		return 0, false, nil
 	}
 	return minWindow, true, nil
+}
+
+// FieldType is one flattened mapping field and the type(s) it resolves to across
+// all backing indices of the target.
+type FieldType struct {
+	Name    string            // dotted path, e.g. "user.id"
+	Types   []string          // distinct types across indices, sorted ascending
+	ByIndex map[string]string // index name -> type; populated only when len(Types) > 1
+}
+
+// mappingNode is one node in a _mapping properties tree: an optional explicit
+// type, optional nested sub-properties (an object field), and optional
+// multi-fields declared under a leaf field.
+type mappingNode struct {
+	Type       string                 `json:"type"`
+	Properties map[string]mappingNode `json:"properties"`
+	Fields     map[string]mappingNode `json:"fields"`
+}
+
+// GetMapping issues GET /<target>/_mapping and returns the target's fields
+// flattened to dotted paths and aggregated across all resolved indices. Each
+// FieldType carries the distinct set of types observed across indices (sorted
+// ascending); ByIndex is populated only on a type conflict (the set has size
+// >1). The returned slice is ordered by field path so all output formats list
+// fields identically.
+func (c *Client) GetMapping(ctx context.Context, target string) ([]FieldType, error) {
+	data, err := c.do(ctx, http.MethodGet, "/"+escapeTarget(target)+"/_mapping", nil)
+	if err != nil {
+		return nil, err
+	}
+	// Shape: {"<index>":{"mappings":{"properties":{...}}}}
+	var raw map[string]struct {
+		Mappings struct {
+			Properties map[string]mappingNode `json:"properties"`
+		} `json:"mappings"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse mapping: %w", err)
+	}
+
+	// byField[path][index] = type, accumulated across every resolved index.
+	byField := make(map[string]map[string]string)
+	for index, idx := range raw {
+		flat := make(map[string]string)
+		flattenProperties("", idx.Mappings.Properties, flat)
+		for path, typ := range flat {
+			if byField[path] == nil {
+				byField[path] = make(map[string]string)
+			}
+			byField[path][index] = typ
+		}
+	}
+
+	out := make([]FieldType, 0, len(byField))
+	for path, perIndex := range byField {
+		types := distinctSortedTypes(perIndex)
+		ft := FieldType{Name: path, Types: types}
+		// Only a divergent type set is a conflict worth the per-index breakdown;
+		// a field present in only some indices with one type is not.
+		if len(types) > 1 {
+			ft.ByIndex = perIndex
+		}
+		out = append(out, ft)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// flattenProperties walks a mapping properties tree, writing one path->type entry
+// per leaf field and per multi-field into flat. A node carrying sub-properties is
+// recursed into with a dotted prefix and does NOT itself produce an entry; a leaf
+// (explicit type, no sub-properties) produces its entry plus one per multi-field;
+// a node with neither a type nor sub-properties (a dynamic or empty object) is
+// typed "object".
+func flattenProperties(prefix string, props map[string]mappingNode, flat map[string]string) {
+	for name, node := range props {
+		path := name
+		if prefix != "" {
+			path = prefix + "." + name
+		}
+		switch {
+		case len(node.Properties) > 0:
+			flattenProperties(path, node.Properties, flat)
+		case node.Type != "":
+			flat[path] = node.Type
+			for sub, subNode := range node.Fields {
+				flat[path+"."+sub] = subNode.Type
+			}
+		default:
+			flat[path] = "object"
+		}
+	}
+}
+
+// distinctSortedTypes returns the deduplicated, ascending-sorted set of types in a
+// field's per-index breakdown.
+func distinctSortedTypes(perIndex map[string]string) []string {
+	seen := make(map[string]struct{}, len(perIndex))
+	for _, t := range perIndex {
+		seen[t] = struct{}{}
+	}
+	types := make([]string, 0, len(seen))
+	for t := range seen {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	return types
 }
 
 // escapeTarget percent-encodes only characters that would break URL structure
