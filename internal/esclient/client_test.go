@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
@@ -207,6 +208,36 @@ func TestSearchPostsToTarget(t *testing.T) {
 	}
 	if reqs[0].method != http.MethodPost || reqs[0].path != "/app-logs/_search" {
 		t.Errorf("got %s %s, want POST /app-logs/_search", reqs[0].method, reqs[0].path)
+	}
+}
+
+// TestSearchParsesAggregations asserts the response's aggregations block is
+// exposed as raw JSON and that _shards.failed/failures are parsed for callers to
+// detect partial shard failures.
+func TestSearchParsesAggregations(t *testing.T) {
+	var reqs []captured
+	body := `{"_shards":{"total":5,"successful":4,"failed":1,"failures":[{"shard":0,"index":"i","reason":{"type":"illegal_argument_exception","reason":"Fielddata is disabled on [ip]"}}]},` +
+		`"hits":{"total":{"value":12},"hits":[]},` +
+		`"aggregations":{"group":{"buckets":[{"key":"timeout","doc_count":42}]}}}`
+	srv := newStub(t, 200, body, &reqs)
+	defer srv.Close()
+
+	resp, err := newClient(t, srv.URL, AuthConfig{}).Search(context.Background(), "app-logs", []byte(`{"size":0,"aggs":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(resp.Aggregations, &got); err != nil {
+		t.Fatalf("aggregations not exposed as raw JSON: %v (%s)", err, resp.Aggregations)
+	}
+	if _, ok := got["group"]; !ok {
+		t.Errorf("aggregations missing group block: %s", resp.Aggregations)
+	}
+	if resp.Shards.Failed != 1 {
+		t.Errorf("_shards.failed = %d, want 1", resp.Shards.Failed)
+	}
+	if len(resp.Shards.Failures) != 1 {
+		t.Errorf("_shards.failures len = %d, want 1", len(resp.Shards.Failures))
 	}
 }
 

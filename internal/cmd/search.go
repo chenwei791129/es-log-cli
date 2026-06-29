@@ -37,6 +37,17 @@ type searchParams struct {
 	size     int
 	includes []string
 	excludes []string
+	// Aggregation flags. The structured set (terms/dateHistogram/metrics/
+	// cardinalities) and the raw passthrough (rawAggs) are mutually exclusive,
+	// enforced in validate.
+	terms         string   // --terms <field>[:<size>]
+	dateHistogram string   // --date-histogram <field>:<interval>
+	metrics       []string // --metric <op>:<field> (repeatable)
+	cardinalities []string // --cardinality <field> (repeatable)
+	rawAggs       string   // --aggs <json object>
+	// sizeExplicit records whether --size was set on the command line, so the
+	// aggregation path can default to size 0 while honoring an explicit override.
+	sizeExplicit bool
 	// trackTotal requests an exact hit count (track_total_hits) so json output's
 	// total is accurate beyond 10000; left off for jsonl/table to avoid the cost.
 	trackTotal bool
@@ -53,6 +64,9 @@ func newSearchCommand(opts *globalOptions) *cobra.Command {
 			if len(args) == 1 && p.target == "" {
 				p.target = args[0]
 			}
+			// Record whether --size was set so the aggregation path can default to
+			// size 0 (buckets only) yet honor an explicit hit-count override.
+			p.sizeExplicit = cmd.Flags().Changed("size")
 			return runSearch(cmd, opts, p)
 		},
 	}
@@ -68,6 +82,13 @@ func newSearchCommand(opts *globalOptions) *cobra.Command {
 	f.IntVarP(&p.size, "size", "n", 50, "max hits to fetch; 0 fetches all via pagination")
 	f.StringArrayVarP(&p.includes, "include", "i", nil, "keep hits whose _source JSON matches (repeatable)")
 	f.StringArrayVarP(&p.excludes, "exclude", "e", nil, "drop hits whose _source JSON matches (repeatable)")
+
+	// Aggregation flags. The structured set and --aggs are mutually exclusive.
+	f.StringVar(&p.terms, "terms", "", "terms aggregation: <field>[:<size>] (default size 10)")
+	f.StringVar(&p.dateHistogram, "date-histogram", "", "date histogram aggregation: <field>:<interval> (s/m/h/d fixed, w/M/y calendar)")
+	f.StringArrayVar(&p.metrics, "metric", nil, "metric sub-aggregation: <op>:<field>, op one of sum/avg/min/max/value_count (repeatable)")
+	f.StringArrayVar(&p.cardinalities, "cardinality", nil, "cardinality (approx distinct count) aggregation: <field> (repeatable)")
+	f.StringVar(&p.rawAggs, "aggs", "", "raw Elasticsearch aggs JSON object (mutually exclusive with structured aggregation flags)")
 
 	// --limit is an alias for --size.
 	f.SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
@@ -87,6 +108,9 @@ func (p *searchParams) validate() error {
 	}
 	if p.size < 0 {
 		return newExitError(exitUsage, "invalid --size %d: must be 0 (all) or a positive number", p.size)
+	}
+	if err := p.validateAggregation(); err != nil {
+		return err
 	}
 	if p.since != "" && (p.from != "" || p.to != "") {
 		return newExitError(exitUsage, "--since is mutually exclusive with --from/--to")
@@ -151,6 +175,9 @@ func runSearch(cmd *cobra.Command, opts *globalOptions, p *searchParams) error {
 	if err := p.validate(); err != nil {
 		return err
 	}
+	// Compile include/exclude patterns before dispatching so a malformed regex is
+	// reported as a usage error in both the hit and aggregation paths, even though
+	// only the hit path applies them.
 	includes, err := compileRegexes(p.includes)
 	if err != nil {
 		return newExitError(exitUsage, "invalid --include pattern: %v", err)
@@ -173,8 +200,12 @@ func runSearch(cmd *cobra.Command, opts *globalOptions, p *searchParams) error {
 	if err != nil {
 		return err
 	}
-
 	printer := opts.printer(cmd)
+
+	if p.hasAggregation() {
+		return runAggregation(cmd, p, client, format, printer)
+	}
+
 	hits, total, err := executeSearch(cmd.Context(), client, p, printer)
 	if err != nil {
 		return classifyESError(p.target, err)
@@ -267,26 +298,23 @@ func lookupWindow(ctx context.Context, client *esclient.Client, target string) i
 // buildBody constructs the _search request body for the given page size and
 // optional search_after cursor.
 func (p searchParams) buildBody(size int, searchAfter []json.RawMessage) ([]byte, error) {
-	var queryPart map[string]any
-	if p.query != "" {
-		queryPart = map[string]any{"query_string": map[string]any{"query": p.query}}
-	} else {
-		queryPart = map[string]any{"match_all": map[string]any{}}
+	body := p.baseBody(size)
+	body["sort"] = p.sortClause()
+	if searchAfter != nil {
+		body["search_after"] = searchAfter
 	}
+	return json.Marshal(body)
+}
 
+// baseBody builds the request keys shared by the hit and aggregation bodies: the
+// size, the shared query/range, the optional _source projection, and the optional
+// exact-total request. Each caller decorates it with its mode-specific keys
+// (sort/search_after vs aggs). The _source projection applies to both paths so
+// --fields also projects the hits returned alongside aggregations.
+func (p searchParams) baseBody(size int) map[string]any {
 	body := map[string]any{
-		"size": size,
-		"sort": p.sortClause(),
-	}
-	if rng := p.rangeFilter(); rng != nil {
-		body["query"] = map[string]any{
-			"bool": map[string]any{
-				"must":   []any{queryPart},
-				"filter": []any{map[string]any{"range": rng}},
-			},
-		}
-	} else {
-		body["query"] = queryPart
+		"size":  size,
+		"query": p.queryClause(),
 	}
 	if len(p.fields) > 0 {
 		body["_source"] = p.fields
@@ -294,10 +322,28 @@ func (p searchParams) buildBody(size int, searchAfter []json.RawMessage) ([]byte
 	if p.trackTotal {
 		body["track_total_hits"] = true
 	}
-	if searchAfter != nil {
-		body["search_after"] = searchAfter
+	return body
+}
+
+// queryClause builds the request's query portion: a bare query_string/match_all
+// when no time bounds are set, or a bool wrapping that query in must with the
+// range filter when they are. Shared by the hit and aggregation request bodies.
+func (p searchParams) queryClause() map[string]any {
+	var queryPart map[string]any
+	if p.query != "" {
+		queryPart = map[string]any{"query_string": map[string]any{"query": p.query}}
+	} else {
+		queryPart = map[string]any{"match_all": map[string]any{}}
 	}
-	return json.Marshal(body)
+	if rng := p.rangeFilter(); rng != nil {
+		return map[string]any{
+			"bool": map[string]any{
+				"must":   []any{queryPart},
+				"filter": []any{map[string]any{"range": rng}},
+			},
+		}
+	}
+	return queryPart
 }
 
 // rangeFilter builds the range clause keyed by the timestamp field, or nil when
@@ -395,16 +441,22 @@ type searchJSON struct {
 	Hits  []searchHitJSON `json:"hits"`
 }
 
+// hitsToJSON maps hits to their json-output envelope, shared by the hit and
+// aggregation json renderers. The result is always non-nil so it marshals as [].
+func hitsToJSON(hits []esclient.Hit) []searchHitJSON {
+	out := make([]searchHitJSON, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, searchHitJSON{ID: h.ID, Index: h.Index, Score: h.Score, Source: h.Source})
+	}
+	return out
+}
+
 // renderSearch writes search results in the requested format.
 func renderSearch(cmd *cobra.Command, format string, hits []esclient.Hit, total int, tsField string) error {
 	out := cmd.OutOrStdout()
 	switch format {
 	case output.FormatJSON:
-		doc := searchJSON{Total: total, Hits: make([]searchHitJSON, 0, len(hits))}
-		for _, h := range hits {
-			doc.Hits = append(doc.Hits, searchHitJSON{ID: h.ID, Index: h.Index, Score: h.Score, Source: h.Source})
-		}
-		return output.WriteJSON(out, doc)
+		return output.WriteJSON(out, searchJSON{Total: total, Hits: hitsToJSON(hits)})
 	case output.FormatTable:
 		return renderSearchTable(out, hits, tsField)
 	default: // jsonl: each line is the bare _source

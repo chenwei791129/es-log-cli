@@ -190,12 +190,23 @@ func (c *Client) ListDataStreams(ctx context.Context) ([]DataStreamEntry, error)
 
 // SearchResponse is the parsed _search response.
 type SearchResponse struct {
+	// Shards carries the _shards summary; Failed and Failures let callers detect
+	// and surface partial shard failures rather than silently treating a 200 with
+	// failed shards as a complete result.
+	Shards struct {
+		Failed   int               `json:"failed"`
+		Failures []json.RawMessage `json:"failures"`
+	} `json:"_shards"`
 	Hits struct {
 		Total struct {
 			Value int `json:"value"`
 		} `json:"total"`
 		Hits []Hit `json:"hits"`
 	} `json:"hits"`
+	// Aggregations is the raw aggregations block, exposed verbatim so the command
+	// layer owns all aggregation rendering. It is nil when the response carries no
+	// aggregations.
+	Aggregations json.RawMessage `json:"aggregations"`
 }
 
 // Hit is a single search hit including its envelope and source.
