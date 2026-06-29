@@ -21,6 +21,9 @@ Designed for AI agents first, humans and CI second. Supports Elasticsearch 8.x+.
   `--include`/`--exclude` regexes filter on the client side.
 - **Unbounded fetch** — `--size 0` pages through all matches with `search_after`,
   automatically respecting `max_result_window`.
+- **Server-side aggregations** — structured `--terms`/`--date-histogram`/`--metric`/
+  `--cardinality` flags or a raw `--aggs` JSON passthrough run on the same read-only
+  `_search` endpoint; results render as json, flattened jsonl, or table.
 - **Secret hygiene** — `${ENV_VAR}` expansion, `config view` redaction, no
   Authorization headers in output.
 
@@ -115,7 +118,28 @@ es-log -c prod search -t app-logs -q 'status:500' --size 0 > errors.jsonl
 
 # Full result document with metadata
 es-log -c prod search -t app-logs -q 'level:error' -o json | jq '.total'
+
+# Aggregation: top services with a per-bucket metric (structured mode)
+es-log -c prod search -t app-logs -q 'level:error' --since 24h \
+  --terms service:10 --metric sum:bytes
+
+# Aggregation: traffic over 5-minute buckets
+# (s/m/h/d → fixed_interval, any multiplier; w/M/y → calendar_interval, multiplier 1 only)
+es-log -c prod search -t metrics --since 1h --date-histogram @timestamp:5m
+
+# Raw aggregation passthrough: Top ISP by summed bytes (use -o json for nested shapes)
+es-log -c it-es search -t netflow-external --since 1h -o json \
+  --aggs '{"top_isp":{"terms":{"field":"isp","size":10,"order":{"bytes":"desc"}},"aggs":{"bytes":{"sum":{"field":"bytes"}}}}}'
 ```
+
+The structured aggregation flags and `--aggs` are mutually exclusive, as are
+`--terms` and `--date-histogram`; any conflict (or a malformed metric op, a
+non-positive terms size, a bad date-histogram interval, or a non-object `--aggs`)
+fails with exit code 2 before any request. The shared `--query`/`--since`/`--from`/
+`--to`/`--timestamp-field` flags apply to both aggregation modes, and the request
+defaults to `size: 0` (buckets only) unless `--size N` is given to also return hits.
+Unlike a plain search, `--size 0` in aggregation mode means no hits (the default),
+not "fetch everything".
 
 ### Global flags
 
@@ -139,12 +163,19 @@ es-log -c prod search -t app-logs -q 'level:error' -o json | jq '.total'
 independent of `-o`, so the same patterns yield the same filtered set in every
 format.
 
+For aggregation queries: **json** → `{"total":N,"aggregations":<block>,"hits":[...]}`
+(`hits` empty unless `--size N`); **jsonl** → one flattened `{"key","doc_count",
+"<metric>"...}` object per bucket (top-level metrics emit a single object; raw
+`--aggs` emits the `aggregations` object on one line); **table** → aligned
+`key`/`doc_count`/per-metric columns (raw mode prints the `aggregations` JSON —
+prefer `-o json` for nested `--aggs` results).
+
 ### Exit codes
 
 | Code | Meaning |
 | ---- | ------- |
 | 0 | Success |
-| 2 | Argument/config error (missing context, conflicting time flags, missing target, unset secret variable) |
+| 2 | Argument/config error (missing context, conflicting time flags, missing target, unset secret variable, conflicting or malformed aggregation flags) |
 | 3 | Connection or authentication failure |
 | 4 | Target not found (ES 404 `index_not_found`) |
 
