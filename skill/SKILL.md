@@ -1,6 +1,6 @@
 ---
 name: es-log
-description: Query Elasticsearch logs in read-only mode. Use when you need to fetch, search, or filter logs from ES (beats → index alias or datastream) and require "never run destructive operations" plus "agent-friendly JSONL output". Triggers on situations like "query ES logs", "search elasticsearch logs", "fetch errors from app-logs".
+description: Query Elasticsearch logs in read-only mode. Use when you need to fetch, search, or filter logs from ES (beats → index alias or datastream), inspect a target's field mappings/types, or spot cross-index type conflicts, and require "never run destructive operations" plus "agent-friendly JSONL output". Triggers on situations like "query ES logs", "search elasticsearch logs", "fetch errors from app-logs", "what fields does this index have", "find mapping type conflicts".
 ---
 
 # es-log
@@ -10,6 +10,7 @@ description: Query Elasticsearch logs in read-only mode. Use when you need to fe
 ## When to use
 
 - You need to fetch or search logs from Elasticsearch (alias or datastream).
+- You need to inspect a target's fields and types before querying, or spot fields whose type diverges across a target's backing indices (a common cause of partial shard failures).
 - You need a safe query entry point that cannot accidentally hit destructive endpoints.
 - You need structured output consumable line-by-line by `jq`, or a full payload with metadata/total.
 
@@ -54,6 +55,20 @@ List aliases and datastreams together; each row has `name` and `type`. `ls alias
 ```bash
 es-log -c prod ls                     # combined view (JSON array)
 es-log -c prod ls datastreams -o table
+```
+
+### `es-log -c <ctx> fields <target>`
+
+Run `GET /<target>/_mapping` and present it as a flattened list of field paths and types. Takes exactly one `<target>` (alias, datastream, comma-separated targets, or wildcard). Nested objects flatten to dotted paths (`user.id`), multi-fields become their own entries (`message.keyword`), and an object with no sub-properties is typed `object`.
+
+When the target resolves to multiple backing indices and the same field has more than one type across them, that field is a **type conflict** (the common root cause of partial shard failures). Conflicts are surfaced in every format: `table` appends a `⚠ conflict` marker, and `json`/`jsonl` set `"conflict": true` and add an `"indices"` per-index type breakdown. A field present in only some indices but with one consistent type is not a conflict. Defaults to `json`.
+
+```bash
+es-log -c prod fields app-logs                  # JSON array of {name, types, conflict}
+es-log -c prod fields 'app-logs,web-logs' -o table
+
+# Count fields whose type conflicts across indices
+es-log -c prod fields 'app-logs,web-logs' | jq '[.[] | select(.conflict)] | length'
 ```
 
 ### `es-log -c <ctx> search -t <target> [flags]`
@@ -130,8 +145,8 @@ es-log -c prod search -t netflow --since 1h -o json \
 ## Output formats
 
 - **jsonl** (`search` default): one hit per line = raw `_source`, with no `_id`/`_index`/`_score` wrapper. Best for `jq -c`, `grep`, `head`, and streaming.
-- **json**: `search` returns `{"total":N,"hits":[{"_id","_index","_score","_source"}]}`; `ls` returns an array of row objects; `config get-contexts` returns an array of name strings; `config view` returns the config object.
-- **table**: human-readable aligned columns.
+- **json**: `search` returns `{"total":N,"hits":[{"_id","_index","_score","_source"}]}`; `ls` returns an array of row objects; `fields` returns an array of `{"name","types","conflict"}` rows (a conflict row also carries `"indices":{<index>:<type>}`, omitted otherwise); `config get-contexts` returns an array of name strings; `config view` returns the config object.
+- **table**: human-readable aligned columns. `fields` renders `FIELD`/`TYPE`, appending `⚠ conflict` to a divergent row.
 
 `--include/--exclude` always match against the `_source` JSON, so the same pattern set yields identical filtering under both jsonl and json.
 
@@ -149,5 +164,6 @@ For aggregation queries the shapes are:
 | 2 | argument/config error (missing context, `--since` conflicting with `--from/--to`, missing target, unset secret `${ENV_VAR}`, conflicting or malformed aggregation flags) |
 | 3 | connection or authentication failure |
 | 4 | target not found (ES 404 index_not_found) |
+| 5 | incomplete results — `search`/aggregation got `200 OK` but some shards failed (partial shard failure) |
 
-Errors always go to stderr as plain text; on failure, stdout never contains partial results.
+Errors always go to stderr as plain text; on a hard failure (exit 2/3/4) stdout never contains result output. Exit 5 is different: the cluster responded `200 OK` but reported failed shards, so the partial results are still written to stdout while a diagnostic naming the failed-shard count and reason goes to stderr — check the exit code before trusting the output. (`fields` never returns 5; it reads `_mapping`, not shards.)
