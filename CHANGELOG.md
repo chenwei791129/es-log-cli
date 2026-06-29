@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/chenwei791129/es-log-cli/compare/v1.0.0...v1.1.0) (2026-06-29)
+
+
+### Features
+
+* **search:** add server-side Elasticsearch aggregations ([c461856](https://github.com/chenwei791129/es-log-cli/commit/c461856b03880f540ab1a070251111e70453fd91))
+
 ## 1.0.0 (2026-06-28)
 
 
