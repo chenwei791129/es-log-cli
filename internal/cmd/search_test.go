@@ -285,6 +285,97 @@ func TestWindowFallbackTo10000(t *testing.T) {
 	}
 }
 
+// ---- partial shard failure surfacing (hit path) ----
+
+// shardPage builds a _search response with count hits and a _shards block
+// reporting failed of total shards with one fielddata failure reason.
+func shardPage(total, startIdx, count, failed, totalShards int) string {
+	hits := make([]string, 0, count)
+	for i := startIdx; i < startIdx+count; i++ {
+		hits = append(hits, fmt.Sprintf(
+			`{"_id":"id-%d","_index":"app-logs","_score":null,"_source":{"n":%d,"message":"m%d"},"sort":[%d]}`,
+			i, i, i, i))
+	}
+	shards := fmt.Sprintf(`{"total":%d,"successful":%d,"failed":%d,`+
+		`"failures":[{"shard":0,"index":"i","reason":{"type":"illegal_argument_exception","reason":"Fielddata is disabled on [some_field]"}}]}`,
+		totalShards, totalShards-failed, failed)
+	return fmt.Sprintf(`{"_shards":%s,"hits":{"total":{"value":%d},"hits":[%s]}}`, shards, total, strings.Join(hits, ","))
+}
+
+// TestSearchSinglePartialFailure asserts a single bounded search that reports
+// failed shards still writes its hits to stdout but exits 5 with a diagnostic
+// naming the failed-shard count and reason on stderr.
+func TestSearchSinglePartialFailure(t *testing.T) {
+	stub := newESStub(t, func(recordedReq) (int, string) { return 200, shardPage(3, 0, 3, 2, 5) })
+	cfg := writeTestConfig(t, stub.url())
+	res := runCLI(t, context.Background(), "search", "-c", "test", "-t", "app-logs", "--config", cfg)
+	if res.code != 5 {
+		t.Fatalf("exit %d, want 5 (stderr=%s)", res.code, res.stderr)
+	}
+	if !strings.Contains(res.stdout, `"m0"`) {
+		t.Errorf("partial hits should still be written to stdout, got %q", res.stdout)
+	}
+	want := "incomplete results: 2 of 5 shards failed (Fielddata is disabled on [some_field])"
+	if !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr = %q, want it to contain %q", res.stderr, want)
+	}
+}
+
+// TestSearchPaginatedPartialFailure asserts that during search_after pagination a
+// shard failure on any page marks the overall result incomplete: hits from all
+// pages are written, the first failing page's summary (count, total, reason) is
+// reported verbatim without accumulating across pages, and the exit code is 5.
+func TestSearchPaginatedPartialFailure(t *testing.T) {
+	page := 0
+	stub := newESStub(t, func(r recordedReq) (int, string) {
+		if containsPath(r.path, "_settings") {
+			return 200, settingsBody(2)
+		}
+		page++
+		switch page {
+		case 1:
+			// First page: full window (2 hits) with 1 failed shard.
+			return 200, shardPage(4, 0, 2, 1, 5)
+		case 2:
+			// Second page: full window (2 hits) with 2 more failed shards.
+			return 200, shardPage(4, 2, 2, 2, 5)
+		default:
+			// Final page: no hits, no failures -> pagination stops.
+			return 200, searchPage(4, 4, 0)
+		}
+	})
+	cfg := writeTestConfig(t, stub.url())
+	res := runCLI(t, context.Background(), "search", "-c", "test", "-t", "app-logs",
+		"--size", "0", "-o", "jsonl", "--config", cfg)
+	if res.code != 5 {
+		t.Fatalf("exit %d, want 5 (stderr=%s)", res.code, res.stderr)
+	}
+	lines := strings.Split(strings.TrimRight(res.stdout, "\n"), "\n")
+	if len(lines) != 4 {
+		t.Errorf("expected 4 collected hits on stdout, got %d (%q)", len(lines), res.stdout)
+	}
+	// The first failing page's summary is reported verbatim (1 of 5), not the
+	// cross-page sum, so the count never exceeds the total.
+	want := "incomplete results: 1 of 5 shards failed (Fielddata is disabled on [some_field])"
+	if !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr = %q, want it to contain %q", res.stderr, want)
+	}
+}
+
+// TestSearchNoPartialOnSuccess asserts a fully successful search (failed==0) exits
+// 0 with no shard-failure diagnostic.
+func TestSearchNoPartialOnSuccess(t *testing.T) {
+	stub := newESStub(t, func(recordedReq) (int, string) { return 200, shardPage(2, 0, 2, 0, 5) })
+	cfg := writeTestConfig(t, stub.url())
+	res := runCLI(t, context.Background(), "search", "-c", "test", "-t", "app-logs", "--config", cfg)
+	if res.code != 0 {
+		t.Fatalf("exit %d, want 0 (stderr=%s)", res.code, res.stderr)
+	}
+	if strings.Contains(res.stderr, "incomplete results") {
+		t.Errorf("no diagnostic expected on full success, got %q", res.stderr)
+	}
+}
+
 // ---- output schema tests ----
 
 func TestJSONLBareSource(t *testing.T) {

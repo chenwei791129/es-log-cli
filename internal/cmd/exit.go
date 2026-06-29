@@ -16,6 +16,7 @@ const (
 	exitUsage    = 2 // argument/config errors (missing context, conflicting flags)
 	exitConn     = 3 // connection or authentication failure
 	exitNotFound = 4 // target index/datastream not found (404)
+	exitPartial  = 5 // query responded but the result is incomplete (partial shard failure)
 )
 
 // exitError carries an explicit process exit code alongside an error message.
@@ -31,6 +32,16 @@ func (e *exitError) Unwrap() error { return e.err }
 // newExitError builds an exitError with a formatted message.
 func newExitError(code int, format string, args ...any) *exitError {
 	return &exitError{code: code, err: fmt.Errorf(format, args...)}
+}
+
+// newPartialExitError builds the exitPartial exit error describing a partial
+// shard failure as "incomplete results: N of M shards failed (<reason>)". An
+// empty reason (none could be parsed) is reported as "unknown reason".
+func newPartialExitError(failed, total int, reason string) *exitError {
+	if reason == "" {
+		reason = "unknown reason"
+	}
+	return newExitError(exitPartial, "incomplete results: %d of %d shards failed (%s)", failed, total, reason)
 }
 
 // SignalExitCode maps a signal to its conventional exit code (128 + signum),
@@ -73,7 +84,9 @@ func classifyESError(target string, err error) error {
 		case 401, 403:
 			return newExitError(exitConn, "authentication failed (%s)", apiErr.Summary())
 		default:
-			return newExitError(exitConn, "elasticsearch error (%s)", apiErr.Summary())
+			// Diagnostic carries the root-cause reason when one was extracted, and
+			// falls back to the status/type-only Summary when it is empty.
+			return newExitError(exitConn, "elasticsearch error (%s)", apiErr.Diagnostic())
 		}
 	}
 	return newExitError(exitConn, "connection failed: %v", err)

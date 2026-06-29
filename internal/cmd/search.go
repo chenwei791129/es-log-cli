@@ -206,18 +206,29 @@ func runSearch(cmd *cobra.Command, opts *globalOptions, p *searchParams) error {
 		return runAggregation(cmd, p, client, format, printer)
 	}
 
-	hits, total, err := executeSearch(cmd.Context(), client, p, printer)
+	hits, total, partial, err := executeSearch(cmd.Context(), client, p, printer)
 	if err != nil {
 		return classifyESError(p.target, err)
 	}
 
 	hits = filterHits(hits, includes, excludes)
-	return renderSearch(cmd, format, hits, total, p.tsField)
+	if err := renderSearch(cmd, format, hits, total, p.tsField); err != nil {
+		return err
+	}
+	// A partial shard failure is surfaced after the (incomplete) hits are written
+	// to stdout: emit a non-zero-exit diagnostic so the result is never silently
+	// treated as complete. Fully successful searches (failed==0) return nil.
+	if partial != nil {
+		return newPartialExitError(partial.Failed, partial.Total, partial.Reason)
+	}
+	return nil
 }
 
 // executeSearch runs either a single bounded search or full search_after
-// pagination, returning the collected hits and the Elasticsearch total.
-func executeSearch(ctx context.Context, client *esclient.Client, p *searchParams, printer *output.Printer) ([]esclient.Hit, int, error) {
+// pagination, returning the collected hits, the Elasticsearch total, and a
+// ShardFailure (nil unless some shard failed) so the caller can surface
+// incomplete results.
+func executeSearch(ctx context.Context, client *esclient.Client, p *searchParams, printer *output.Printer) ([]esclient.Hit, int, *esclient.ShardFailure, error) {
 	switch {
 	case p.size == 0:
 		return paginateAll(ctx, client, p)
@@ -234,43 +245,55 @@ func executeSearch(ctx context.Context, client *esclient.Client, p *searchParams
 	}
 }
 
-// singleSearch issues one bounded search.
-func singleSearch(ctx context.Context, client *esclient.Client, p *searchParams, size int) ([]esclient.Hit, int, error) {
+// singleSearch issues one bounded search, reporting a ShardFailure when the
+// response carries failed shards.
+func singleSearch(ctx context.Context, client *esclient.Client, p *searchParams, size int) ([]esclient.Hit, int, *esclient.ShardFailure, error) {
 	body, err := p.buildBody(size, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	resp, err := client.Search(ctx, p.target, body)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
-	return resp.Hits.Hits, resp.Hits.Total.Value, nil
+	return resp.Hits.Hits, resp.Hits.Total.Value, resp.ShardFailure(), nil
 }
 
 // paginateAll retrieves every matching hit via search_after, paging with size=W.
-func paginateAll(ctx context.Context, client *esclient.Client, p *searchParams) ([]esclient.Hit, int, error) {
+// If any page reports failed shards the overall result is marked incomplete by
+// retaining the first failing page's shard summary verbatim (failed count, total,
+// and reason all from the same response, so the reported "N of M failed (reason)"
+// is internally consistent). Later failing pages don't inflate the count, since a
+// shard that fails on every page would otherwise be tallied repeatedly.
+func paginateAll(ctx context.Context, client *esclient.Client, p *searchParams) ([]esclient.Hit, int, *esclient.ShardFailure, error) {
 	window := lookupWindow(ctx, client, p.target)
 	var (
 		all         []esclient.Hit
 		searchAfter []json.RawMessage
 		total       int
 		firstPage   = true
+		partial     *esclient.ShardFailure
 	)
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, 0, err
+			return nil, 0, nil, err
 		}
 		body, err := p.buildBody(window, searchAfter)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, nil, err
 		}
 		resp, err := client.Search(ctx, p.target, body)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, nil, err
 		}
 		if firstPage {
 			total = resp.Hits.Total.Value
 			firstPage = false
+		}
+		if partial == nil {
+			// Retain only the first failing page's summary; it is a consistent
+			// (failed, total, reason) triple from one response.
+			partial = resp.ShardFailure()
 		}
 		n := len(resp.Hits.Hits)
 		if n == 0 {
@@ -282,7 +305,7 @@ func paginateAll(ctx context.Context, client *esclient.Client, p *searchParams) 
 			break
 		}
 	}
-	return all, total, nil
+	return all, total, partial, nil
 }
 
 // lookupWindow resolves the max_result_window for target, falling back to the

@@ -43,3 +43,43 @@ func TestNotFoundMentionsTarget(t *testing.T) {
 		t.Errorf("404 message should name target: %q", err.Error())
 	}
 }
+
+// TestClassifyESErrorSurfacesReason asserts the default (non-404/401/403) branch
+// includes the root-cause reason, locking the spec example message, and falls
+// back to the type-only message when the reason is empty.
+func TestClassifyESErrorSurfacesReason(t *testing.T) {
+	withReason := classifyESError("app-logs", &esclient.APIError{
+		StatusCode: 400,
+		ErrType:    "search_phase_execution_exception",
+		Reason:     "Fielddata is disabled on [some_field]",
+	})
+	wantMsg := "elasticsearch error (HTTP 400: search_phase_execution_exception — Fielddata is disabled on [some_field])"
+	if withReason.Error() != wantMsg {
+		t.Errorf("message = %q, want %q", withReason.Error(), wantMsg)
+	}
+
+	noReason := classifyESError("app-logs", &esclient.APIError{StatusCode: 400, ErrType: "search_phase_execution_exception"})
+	wantFallback := "elasticsearch error (HTTP 400: search_phase_execution_exception)"
+	if noReason.Error() != wantFallback {
+		t.Errorf("fallback message = %q, want %q", noReason.Error(), wantFallback)
+	}
+}
+
+// TestPartialExitError asserts the partial-failure exit error carries exit code 5
+// and the documented message, substituting "unknown reason" for an empty reason.
+func TestPartialExitError(t *testing.T) {
+	err := newPartialExitError(2, 5, "Fielddata is disabled on [some_field]")
+	if err.ExitCode() != exitPartial {
+		t.Errorf("exit code = %d, want %d", err.ExitCode(), exitPartial)
+	}
+	want := "incomplete results: 2 of 5 shards failed (Fielddata is disabled on [some_field])"
+	if err.Error() != want {
+		t.Errorf("message = %q, want %q", err.Error(), want)
+	}
+
+	empty := newPartialExitError(1, 3, "")
+	wantEmpty := "incomplete results: 1 of 3 shards failed (unknown reason)"
+	if empty.Error() != wantEmpty {
+		t.Errorf("empty-reason message = %q, want %q", empty.Error(), wantEmpty)
+	}
+}

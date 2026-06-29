@@ -304,33 +304,16 @@ func runAggregation(cmd *cobra.Command, p *searchParams, client *esclient.Client
 	if err != nil {
 		return classifyESError(p.target, err)
 	}
-	if resp.Shards.Failed > 0 {
-		printer.Warnf("warning: %d shard(s) failed: %s", resp.Shards.Failed, shardFailureReason(resp.Shards.Failures))
+	if err := renderAggregation(cmd.OutOrStdout(), format, p, resp); err != nil {
+		return err
 	}
-	return renderAggregation(cmd.OutOrStdout(), format, p, resp)
-}
-
-// shardFailureReason extracts a human-readable reason from the first shard
-// failure, falling back to the raw failure JSON when the shape is unexpected.
-func shardFailureReason(failures []json.RawMessage) string {
-	if len(failures) == 0 {
-		return "unknown reason"
+	// A partial shard failure is surfaced after the (incomplete) aggregations are
+	// written to stdout: emit a non-zero-exit diagnostic rather than warning and
+	// exiting 0, so an incomplete aggregation is never treated as a complete one.
+	if sf := resp.ShardFailure(); sf != nil {
+		return newPartialExitError(sf.Failed, sf.Total, sf.Reason)
 	}
-	var f struct {
-		Reason struct {
-			Type   string `json:"type"`
-			Reason string `json:"reason"`
-		} `json:"reason"`
-	}
-	if err := json.Unmarshal(failures[0], &f); err == nil {
-		switch {
-		case f.Reason.Reason != "":
-			return f.Reason.Reason
-		case f.Reason.Type != "":
-			return f.Reason.Type
-		}
-	}
-	return string(failures[0])
+	return nil
 }
 
 // aggJSON is the json output document for aggregation results: the query total,
@@ -416,8 +399,8 @@ func (p searchParams) structuredAggRows(aggregations json.RawMessage) (headers [
 	if p.bucketed() {
 		headers = append([]string{"key", "doc_count"}, names...)
 		// A 200 response can omit the aggregations block (e.g. when every shard
-		// failed — already warned upstream). Emit headers but no rows rather than
-		// failing the render with a parse error.
+		// failed — surfaced as an exit-5 diagnostic upstream). Emit headers but no
+		// rows rather than failing the render with a parse error.
 		if len(aggregations) == 0 {
 			return headers, nil, nil
 		}

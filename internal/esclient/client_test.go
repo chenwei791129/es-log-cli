@@ -319,6 +319,128 @@ func TestUnsupportedAuthType(t *testing.T) {
 	}
 }
 
+// TestParseErrorReasonPriority asserts the deepest available root-cause reason is
+// preferred: root_cause over failed_shards over the top-level error.reason.
+func TestParseErrorReasonPriority(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "root_cause preferred over failed_shards and reason",
+			body: `{"error":{"type":"search_phase_execution_exception",` +
+				`"reason":"all shards failed",` +
+				`"root_cause":[{"type":"illegal_argument_exception","reason":"root cause reason"}],` +
+				`"failed_shards":[{"reason":{"type":"illegal_argument_exception","reason":"failed shard reason"}}]}}`,
+			want: "root cause reason",
+		},
+		{
+			name: "failed_shards used when root_cause absent",
+			body: `{"error":{"type":"search_phase_execution_exception",` +
+				`"reason":"all shards failed",` +
+				`"failed_shards":[{"reason":{"type":"illegal_argument_exception","reason":"Fielddata is disabled on [some_field]"}}]}}`,
+			want: "Fielddata is disabled on [some_field]",
+		},
+		{
+			name: "top-level reason used when deeper sources absent",
+			body: `{"error":{"type":"parsing_exception","reason":"parse failure"}}`,
+			want: "parse failure",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, got := parseError([]byte(c.body)); got != c.want {
+				t.Errorf("parseError reason = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestParseErrorReasonUnparseable asserts an unparseable body (or a string-valued
+// "error") yields an empty reason rather than panicking.
+func TestParseErrorReasonUnparseable(t *testing.T) {
+	for _, body := range []string{`not json at all`, `{"error":"unauthorized"}`, `{}`} {
+		if _, got := parseError([]byte(body)); got != "" {
+			t.Errorf("parseError(%q) reason = %q, want empty", body, got)
+		}
+	}
+}
+
+// TestAPIErrorDiagnostic asserts Diagnostic appends the reason when present and
+// falls back to Summary (status + type) when it is empty.
+func TestAPIErrorDiagnostic(t *testing.T) {
+	withReason := &APIError{StatusCode: 400, ErrType: "search_phase_execution_exception", Reason: "Fielddata is disabled on [some_field]"}
+	want := "HTTP 400: search_phase_execution_exception — Fielddata is disabled on [some_field]"
+	if got := withReason.Diagnostic(); got != want {
+		t.Errorf("Diagnostic = %q, want %q", got, want)
+	}
+	noReason := &APIError{StatusCode: 400, ErrType: "search_phase_execution_exception"}
+	if got := noReason.Diagnostic(); got != "HTTP 400: search_phase_execution_exception" {
+		t.Errorf("Diagnostic fallback = %q, want type-only", got)
+	}
+}
+
+// TestShardFailureReason asserts the first _shards.failures reason is extracted,
+// type is used as a fallback, and an empty slice yields "".
+func TestShardFailureReason(t *testing.T) {
+	failures := []json.RawMessage{
+		json.RawMessage(`{"shard":0,"index":"i","reason":{"type":"illegal_argument_exception","reason":"Fielddata is disabled on [ip]"}}`),
+	}
+	if got := ShardFailureReason(failures); got != "Fielddata is disabled on [ip]" {
+		t.Errorf("ShardFailureReason = %q, want fielddata reason", got)
+	}
+	typeOnly := []json.RawMessage{json.RawMessage(`{"reason":{"type":"timeout_exception"}}`)}
+	if got := ShardFailureReason(typeOnly); got != "timeout_exception" {
+		t.Errorf("ShardFailureReason type fallback = %q, want timeout_exception", got)
+	}
+	if got := ShardFailureReason(nil); got != "" {
+		t.Errorf("ShardFailureReason(nil) = %q, want empty", got)
+	}
+}
+
+// TestAPIErrorCarriesReason asserts a non-2xx response populates APIError.Reason
+// via parseError at construction time.
+func TestAPIErrorCarriesReason(t *testing.T) {
+	body := `{"error":{"type":"search_phase_execution_exception",` +
+		`"failed_shards":[{"reason":{"type":"illegal_argument_exception","reason":"Fielddata is disabled on [some_field]"}}]}}`
+	srv := newStub(t, 400, body, &[]captured{})
+	defer srv.Close()
+
+	_, err := newClient(t, srv.URL, AuthConfig{}).Search(context.Background(), "app-logs", []byte(`{}`))
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("want *APIError, got %T", err)
+	}
+	if apiErr.Reason != "Fielddata is disabled on [some_field]" {
+		t.Errorf("APIError.Reason = %q, want fielddata reason", apiErr.Reason)
+	}
+}
+
+// TestSearchParsesShardTotal asserts _shards.total/failed/failures are all parsed
+// so the command layer can report "N of M shards failed".
+func TestSearchParsesShardTotal(t *testing.T) {
+	body := `{"_shards":{"total":5,"successful":3,"failed":2,` +
+		`"failures":[{"shard":0,"index":"i","reason":{"type":"illegal_argument_exception","reason":"Fielddata is disabled on [ip]"}}]},` +
+		`"hits":{"total":{"value":3},"hits":[]}}`
+	srv := newStub(t, 200, body, &[]captured{})
+	defer srv.Close()
+
+	resp, err := newClient(t, srv.URL, AuthConfig{}).Search(context.Background(), "app-logs", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Shards.Total != 5 {
+		t.Errorf("_shards.total = %d, want 5", resp.Shards.Total)
+	}
+	if resp.Shards.Failed != 2 {
+		t.Errorf("_shards.failed = %d, want 2", resp.Shards.Failed)
+	}
+	if len(resp.Shards.Failures) != 1 {
+		t.Errorf("_shards.failures len = %d, want 1", len(resp.Shards.Failures))
+	}
+}
+
 // TestSearchEscapesTarget asserts a target containing URL-significant characters
 // is percent-escaped so it cannot break the request path.
 func TestSearchEscapesTarget(t *testing.T) {

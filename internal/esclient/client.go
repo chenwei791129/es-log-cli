@@ -52,7 +52,11 @@ func New(cfg Config) (*Client, error) {
 type APIError struct {
 	StatusCode int
 	ErrType    string
-	Body       string
+	// Reason is the deepest available root-cause reason extracted from the error
+	// body (see parseError). It is empty when none could be parsed, so callers
+	// can fall back to a status/type-only message.
+	Reason string
+	Body   string
 }
 
 func (e *APIError) Error() string {
@@ -62,12 +66,24 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("elasticsearch responded %d", e.StatusCode)
 }
 
-// Summary returns a short human-readable description of the failure.
+// Summary returns a short human-readable description of the failure: the HTTP
+// status and, when present, the error.type.
 func (e *APIError) Summary() string {
 	if e.ErrType != "" {
 		return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.ErrType)
 	}
 	return fmt.Sprintf("HTTP %d", e.StatusCode)
+}
+
+// Diagnostic returns Summary() extended with the root-cause reason when one was
+// extracted, e.g. "HTTP 400: search_phase_execution_exception — Fielddata is
+// disabled on [some_field]". It falls back to Summary() alone when the reason is
+// empty.
+func (e *APIError) Diagnostic() string {
+	if e.Reason != "" {
+		return e.Summary() + " — " + e.Reason
+	}
+	return e.Summary()
 }
 
 // do issues a single read request. It is unexported and the only callers are the
@@ -97,24 +113,78 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errType, reason := parseError(data)
 		return nil, &APIError{
 			StatusCode: resp.StatusCode,
-			ErrType:    parseErrorType(data),
+			ErrType:    errType,
+			Reason:     reason,
 			Body:       string(data),
 		}
 	}
 	return data, nil
 }
 
-// parseErrorType extracts error.type from an Elasticsearch error response body.
-func parseErrorType(data []byte) string {
+// parseError extracts error.type and the deepest available root-cause reason from
+// a non-2xx Elasticsearch error body in a single pass. The reason is resolved in
+// order of preference: error.root_cause[0].reason, then
+// error.failed_shards[0].reason.reason, then error.reason. Either value is "" when
+// it cannot be parsed (e.g. a string-valued "error" field), so the command layer
+// can fall back to a status/type-only message.
+func parseError(data []byte) (errType, reason string) {
 	var env struct {
 		Error struct {
-			Type string `json:"type"`
+			Type      string `json:"type"`
+			RootCause []struct {
+				Reason string `json:"reason"`
+			} `json:"root_cause"`
+			FailedShards []json.RawMessage `json:"failed_shards"`
+			Reason       string            `json:"reason"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(data, &env); err == nil {
-		return env.Error.Type
+	if err := json.Unmarshal(data, &env); err != nil {
+		return "", ""
+	}
+	errType = env.Error.Type
+	if len(env.Error.RootCause) > 0 && env.Error.RootCause[0].Reason != "" {
+		return errType, env.Error.RootCause[0].Reason
+	}
+	if len(env.Error.FailedShards) > 0 {
+		if r := shardElementReason(env.Error.FailedShards[0]); r != "" {
+			return errType, r
+		}
+	}
+	return errType, env.Error.Reason
+}
+
+// ShardFailureReason returns the reason of the first _shards.failures element of a
+// 2xx search response, or "" when the slice is empty or the reason cannot be
+// parsed. It shares the same nested-reason extraction as error.failed_shards in
+// parseError, since both nest the reason identically.
+func ShardFailureReason(failures []json.RawMessage) string {
+	if len(failures) == 0 {
+		return ""
+	}
+	return shardElementReason(failures[0])
+}
+
+// shardElementReason extracts the reason from a single shard-failure element
+// (either an _shards.failures[] entry or an error.failed_shards[] entry, which
+// share the {"reason":{"type","reason"}} shape), preferring reason.reason then
+// reason.type. It returns "" when neither is present.
+func shardElementReason(elem json.RawMessage) string {
+	var f struct {
+		Reason struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"reason"`
+	}
+	if err := json.Unmarshal(elem, &f); err == nil {
+		switch {
+		case f.Reason.Reason != "":
+			return f.Reason.Reason
+		case f.Reason.Type != "":
+			return f.Reason.Type
+		}
 	}
 	return ""
 }
@@ -190,10 +260,11 @@ func (c *Client) ListDataStreams(ctx context.Context) ([]DataStreamEntry, error)
 
 // SearchResponse is the parsed _search response.
 type SearchResponse struct {
-	// Shards carries the _shards summary; Failed and Failures let callers detect
-	// and surface partial shard failures rather than silently treating a 200 with
-	// failed shards as a complete result.
+	// Shards carries the _shards summary; Total, Failed, and Failures let callers
+	// detect and describe partial shard failures (e.g. "N of M shards failed")
+	// rather than silently treating a 200 with failed shards as a complete result.
 	Shards struct {
+		Total    int               `json:"total"`
 		Failed   int               `json:"failed"`
 		Failures []json.RawMessage `json:"failures"`
 	} `json:"_shards"`
@@ -207,6 +278,29 @@ type SearchResponse struct {
 	// layer owns all aggregation rendering. It is nil when the response carries no
 	// aggregations.
 	Aggregations json.RawMessage `json:"aggregations"`
+}
+
+// ShardFailure summarizes a partial shard failure from a 2xx search response: the
+// total and failed shard counts and the first failure reason.
+type ShardFailure struct {
+	Total  int
+	Failed int
+	Reason string
+}
+
+// ShardFailure reports a partial shard failure when _shards.failed is greater than
+// zero, or nil when every shard succeeded. It owns the "what counts as a partial
+// failure" rule and the first-failure reason extraction so callers need not reach
+// into the _shards block themselves.
+func (r *SearchResponse) ShardFailure() *ShardFailure {
+	if r.Shards.Failed == 0 {
+		return nil
+	}
+	return &ShardFailure{
+		Total:  r.Shards.Total,
+		Failed: r.Shards.Failed,
+		Reason: ShardFailureReason(r.Shards.Failures),
+	}
 }
 
 // Hit is a single search hit including its envelope and source.

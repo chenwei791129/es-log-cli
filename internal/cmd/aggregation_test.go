@@ -460,30 +460,33 @@ const shardFailureResp = `{"_shards":{"total":5,"successful":4,"failed":1,` +
 	`"hits":{"total":{"value":3},"hits":[]},` +
 	`"aggregations":{"group":{"buckets":[{"key":"svc-a","doc_count":3}]}}}`
 
-// TestAggShardFailureSurfaced asserts a partial shard failure prints a warning
-// with the reason to stderr and still emits the aggregations that were returned.
+// TestAggShardFailureSurfaced asserts a partial shard failure emits the partial
+// aggregations to stdout, prints the documented incomplete-results diagnostic to
+// stderr, and exits 5 rather than reporting success.
 func TestAggShardFailureSurfaced(t *testing.T) {
 	res := aggRun(t, shardFailureResp, "--terms", "service", "-o", "jsonl")
-	if res.code != 0 {
-		t.Fatalf("exit %d: %s", res.code, res.stderr)
+	if res.code != 5 {
+		t.Fatalf("exit %d, want 5 (stderr=%s)", res.code, res.stderr)
 	}
-	if !strings.Contains(res.stderr, "Fielddata is disabled") {
-		t.Errorf("expected failure reason on stderr, got %q", res.stderr)
+	want := "incomplete results: 1 of 5 shards failed (Fielddata is disabled on [ip])"
+	if !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr = %q, want it to contain %q", res.stderr, want)
 	}
 	if !strings.Contains(res.stdout, "svc-a") {
 		t.Errorf("expected partial aggregation emitted, got %q", res.stdout)
 	}
 }
 
-// TestAggShardFailureQuiet asserts --quiet suppresses the shard-failure warning
-// while still emitting the aggregations.
-func TestAggShardFailureQuiet(t *testing.T) {
+// TestAggShardFailureQuietStillReports asserts --quiet does NOT swallow the
+// partial-failure diagnostic: it is now a non-zero-exit error (exit 5), not a
+// suppressible warning, so the diagnostic must still reach stderr.
+func TestAggShardFailureQuietStillReports(t *testing.T) {
 	res := aggRun(t, shardFailureResp, "--terms", "service", "--quiet", "-o", "jsonl")
-	if res.code != 0 {
-		t.Fatalf("exit %d: %s", res.code, res.stderr)
+	if res.code != 5 {
+		t.Fatalf("exit %d, want 5 (stderr=%s)", res.code, res.stderr)
 	}
-	if strings.TrimSpace(res.stderr) != "" {
-		t.Errorf("quiet should suppress shard-failure warning, got %q", res.stderr)
+	if !strings.Contains(res.stderr, "incomplete results: 1 of 5 shards failed") {
+		t.Errorf("quiet must not suppress the exit-5 diagnostic, got %q", res.stderr)
 	}
 	if !strings.Contains(res.stdout, "svc-a") {
 		t.Errorf("expected partial aggregation emitted, got %q", res.stdout)
