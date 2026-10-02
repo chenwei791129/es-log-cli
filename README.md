@@ -251,7 +251,7 @@ error: incomplete results: 2 of 5 shards failed (Fielddata is disabled on [some_
 
 ## Development
 
-Requires Go 1.25+. To build from source instead of downloading a release binary:
+Requires Go 1.27.1+. To build from source instead of downloading a release binary:
 
 ```bash
 make build    # produces a CGO-free static ./es-log binary
