@@ -11,7 +11,7 @@ Designed for AI agents first, humans and CI second. Supports Elasticsearch 8.x+.
 ## Features
 
 - **Read-only by design** — the client exposes only `ListAliases`,
-  `ListDataStreams`, `Search`, `GetMaxResultWindow`, `GetMapping`, and `Ping`;
+  `ListDataStreams`, `Search`, `GetMaxResultWindow`, `GetMapping`, and `Info`;
   there is no generic request method that accepts an arbitrary verb or path.
 - **Explicit context** — every query is bound to a context via `--context/-c` or
   `$ES_LOG_CONTEXT`. No hidden `current-context` state.
@@ -96,8 +96,8 @@ contexts:
 es-log config get-contexts
 es-log config view
 
-# Check connectivity / authentication
-es-log -c prod ping
+# Check connectivity / authentication (also reports the server version)
+es-log -c prod ping        # ok: https://es-prod.example.com:9200 (Elasticsearch 9.5.5); branch on the exit code, not the text
 
 # List targets (aliases + datastreams)
 es-log -c prod ls

@@ -46,7 +46,7 @@ Print the resolved config. `api-key`/`password` are always redacted to `***` (no
 
 ### `es-log -c <ctx> ping`
 
-Hit `GET /_cluster/health` to verify connectivity and authentication. Exit 0 on success; exit 3 on connection/auth failure.
+Hit `GET /` to verify connectivity and authentication and report the server version, e.g. `ok: https://es.example (Elasticsearch 9.5.5)`. Exit 0 on success; exit 3 on connection/auth failure. Scripts should branch on the exit code, not on the text.
 
 ### `es-log -c <ctx> ls [aliases|datastreams]`
 
