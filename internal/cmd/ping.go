@@ -20,7 +20,8 @@ func newPingCommand(opts *globalOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, ctx, err := opts.buildClient(cfg)
+			p := opts.printer(cmd)
+			client, ctx, err := opts.buildClient(cfg, p)
 			if err != nil {
 				return err
 			}
@@ -29,7 +30,6 @@ func newPingCommand(opts *globalOptions) *cobra.Command {
 			if err != nil {
 				return newExitError(exitConn, "ping %s failed: %v", server, err)
 			}
-			p := opts.printer(cmd)
 			if !p.Quiet {
 				fprintln(cmd.OutOrStdout(), "ok:", server, "("+describeVersion(v)+")")
 			}

@@ -48,7 +48,7 @@ func runFields(cmd *cobra.Command, opts *globalOptions, target string) error {
 	if err != nil {
 		return err
 	}
-	client, _, err := opts.buildClient(cfg)
+	client, _, err := opts.buildClient(cfg, opts.printer(cmd))
 	if err != nil {
 		return err
 	}

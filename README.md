@@ -6,7 +6,8 @@ endpoints — it is impossible to trigger destructive operations (`DELETE`,
 `_rollover`, `_reindex`, ILM, etc.) through it. Output defaults to JSONL for easy
 `jq`/pipe consumption, with layered exit codes for reliable scripting.
 
-Designed for AI agents first, humans and CI second. Supports Elasticsearch 8.x+.
+Designed for AI agents first, humans and CI second. Tested in CI against
+Elasticsearch 8.19 and 9.5; see [Compatibility](#compatibility).
 
 ## Features
 
@@ -199,7 +200,7 @@ consistent type is **not** marked as a conflict.
 | ---- | ----------- |
 | `-c, --context` | Context to use (or `$ES_LOG_CONTEXT`). Required for ES commands. |
 | `-o, --output` | `jsonl` \| `json` \| `table`. `search` defaults to `jsonl`, others to `json`. |
-| `--quiet` | Suppress warnings/progress; keep stdout clean. |
+| `--quiet` | Suppress warnings (including Elasticsearch deprecation warnings) and progress; keep stdout clean. |
 | `--config` | Config file path (or `$ES_LOG_CONFIG`). |
 
 ### Output formats
@@ -248,6 +249,21 @@ stderr — check the exit code before trusting the output in a script:
 ```text
 error: incomplete results: 2 of 5 shards failed (Fielddata is disabled on [some_field])
 ```
+
+## Compatibility
+
+Tested in CI against the support matrix in
+[`.github/workflows/integration.yml`](.github/workflows/integration.yml)
+(currently Elasticsearch 8.19 and 9.5). An Elasticsearch major is supported
+while it is in the matrix; a major is dropped when Elastic ends its support.
+
+When Elasticsearch flags a request as using deprecated behaviour, the message is
+printed to stderr as `elasticsearch deprecation: <message>` (once per distinct
+message per run; suppressed by `--quiet`). Exit codes and stdout are unaffected.
+
+One codebase serves every supported major, with no Elasticsearch SDK and no
+per-major branches; see [ADR 0001](docs/adr/0001-single-codebase-with-runtime-version-gates.md)
+for why.
 
 ## Development
 

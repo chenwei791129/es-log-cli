@@ -159,3 +159,57 @@ func TestSearchContextCancellation(t *testing.T) {
 		t.Errorf("cancelled search issued %d _search requests, want 0", n)
 	}
 }
+
+// TestE2EDeprecationWarning asserts that a Warning header repeated on every
+// page of a paginated search is printed to stderr exactly once, leaves stdout
+// and the exit code untouched, and is suppressed by --quiet.
+func TestE2EDeprecationWarning(t *testing.T) {
+	const total, window = 25, 10
+	run := func(t *testing.T, extra ...string) (cliResult, *esStub) {
+		t.Helper()
+		served := 0
+		stub := newESStub(t, func(r recordedReq) (int, string) {
+			if containsPath(r.path, "_settings") {
+				return 200, settingsBody(window)
+			}
+			n := min(total-served, window)
+			start := served
+			served += n
+			return 200, searchPage(total, start, n)
+		})
+		stub.headers = http.Header{"Warning": {
+			`299 Elasticsearch-9.5.5-abc "[some_param] is deprecated"`,
+		}}
+		args := append([]string{"search", "-c", "test", "-t", "app-logs", "--size", "0",
+			"--config", writeTestConfig(t, stub.url())}, extra...)
+		return runCLI(t, context.Background(), args...), stub
+	}
+
+	res, stub := run(t)
+	if res.code != 0 {
+		t.Fatalf("exit %d stderr=%s", res.code, res.stderr)
+	}
+	if n := len(stub.searchRequests()); n != 3 {
+		t.Fatalf("expected 3 paged requests, got %d", n)
+	}
+	if want := "elasticsearch deprecation: [some_param] is deprecated\n"; res.stderr != want {
+		t.Errorf("stderr = %q, want exactly %q", res.stderr, want)
+	}
+	lines := strings.Split(strings.TrimRight(res.stdout, "\n"), "\n")
+	if len(lines) != total {
+		t.Errorf("emitted %d JSONL lines, want %d", len(lines), total)
+	}
+	for _, l := range lines {
+		if strings.Contains(l, "deprecat") {
+			t.Errorf("deprecation leaked into stdout: %q", l)
+		}
+	}
+
+	quiet, _ := run(t, "--quiet")
+	if quiet.code != 0 || quiet.stderr != "" {
+		t.Errorf("--quiet: exit %d stderr %q, want 0 and empty", quiet.code, quiet.stderr)
+	}
+	if quiet.stdout != res.stdout {
+		t.Error("--quiet changed stdout")
+	}
+}

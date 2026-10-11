@@ -54,6 +54,8 @@ type esStub struct {
 	reqs   []recordedReq
 	// handler returns (status, body) for a recorded request.
 	handler func(r recordedReq) (int, string)
+	// headers, when set, are added to every response (e.g. Warning headers).
+	headers http.Header
 }
 
 // newESStub starts a stub server delegating responses to handler.
@@ -65,6 +67,11 @@ func newESStub(t *testing.T, handler func(r recordedReq) (int, string)) *esStub 
 		rec := recordedReq{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: data}
 		s.reqs = append(s.reqs, rec)
 		status, body := s.handler(rec)
+		for k, vs := range s.headers {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	}))

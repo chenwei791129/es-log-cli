@@ -196,11 +196,11 @@ func runSearch(cmd *cobra.Command, opts *globalOptions, p *searchParams) error {
 		return err
 	}
 	p.trackTotal = format == output.FormatJSON
-	client, _, err := opts.buildClient(cfg)
+	printer := opts.printer(cmd)
+	client, _, err := opts.buildClient(cfg, printer)
 	if err != nil {
 		return err
 	}
-	printer := opts.printer(cmd)
 
 	if p.hasAggregation() {
 		return runAggregation(cmd, p, client, format, printer)
