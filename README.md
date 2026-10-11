@@ -276,6 +276,18 @@ make lint     # golangci-lint (pinned as a go tool dependency)
 make fmt      # gofmt
 ```
 
+Integration tests run the CLI against a real Elasticsearch and are excluded from
+`make test`. CI runs them against every version in the
+[support matrix](#compatibility); to run them locally (Docker or Podman):
+
+```bash
+docker run --rm -d --name es-test -p 9200:9200 \
+  -e discovery.type=single-node -e xpack.security.enabled=false \
+  -e ES_JAVA_OPTS="-Xms1g -Xmx1g" \
+  docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+ES_LOG_TEST_URL=http://localhost:9200 go test -count=1 -tags integration ./...
+```
+
 ## License
 
 Released under the MIT License — see [LICENSE](LICENSE) for the full text.
