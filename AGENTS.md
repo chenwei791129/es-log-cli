@@ -1,28 +1,13 @@
-<!-- SPECTRA:START v1.0.2 -->
+# es-log-cli — agent notes
 
-# Spectra Instructions
+Read `CONTEXT.md` first for the project vocabulary. Design decisions live in
+`docs/adr/`; read the relevant ADR before changing the client, the config
+model, or the exit-code contract.
 
-This project uses Spectra for Spec-Driven Development(SDD). Specs live in `openspec/specs/`, change proposals in `openspec/changes/`.
-
-## Use `$spectra-*` skills when:
-
-- A discussion needs structure before coding → `$spectra-discuss`
-- User wants to plan, propose, or design a change → `$spectra-propose`
-- Tasks are ready to implement → `$spectra-apply`
-- There's an in-progress change to continue → `$spectra-ingest`
-- User asks about specs or how something works → `$spectra-ask`
-- Implementation is done → `$spectra-archive`
-- Commit only files related to a specific change → `$spectra-commit`
-
-## Workflow
-
-discuss? → propose → apply ⇄ ingest → archive
-
-- `discuss` is optional — skip if requirements are clear
-- Requirements change mid-work? `ingest` → resume `apply`
-
-## Parked Changes
-
-Changes can be parked（暫存）— temporarily moved out of `openspec/changes/`. Parked changes won't appear in `spectra list` but can be found with `spectra list --parked`. To restore: `spectra unpark <name>`. The `$spectra-apply` and `$spectra-ingest` skills handle parked changes automatically.
-
-<!-- SPECTRA:END -->
+- Build: `make build` · Unit tests: `make test` · Lint: `make lint`
+- Integration tests need a reachable Elasticsearch:
+  `ES_LOG_TEST_URL=http://localhost:9200 go test -tags integration ./...`
+  CI runs them against the support matrix in `.github/workflows/integration.yml`.
+- Commits follow Conventional Commits; release-please cuts releases from `main`.
+- The Elasticsearch client is a read-only endpoint whitelist (ADR 0002):
+  never add a generic request method.
