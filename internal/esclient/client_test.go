@@ -677,3 +677,76 @@ func TestSearchPreservesWildcardTarget(t *testing.T) {
 		srv.Close()
 	}
 }
+
+// warnServer replies with status and one Warning header per value.
+func warnServer(t *testing.T, status int, warnings ...string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		for _, v := range warnings {
+			w.Header().Add("Warning", v)
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func newWarnClient(t *testing.T, server string, got *[]string) *Client {
+	t.Helper()
+	c, err := New(Config{Server: server, OnWarning: func(m string) { *got = append(*got, m) }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return c
+}
+
+func TestWarningHeadersReported(t *testing.T) {
+	srv := warnServer(t, 200,
+		`299 Elasticsearch-9.5.5-abc "[first] is deprecated"`,
+		`299 Elasticsearch-9.5.5-abc "say \"hi\" \\ bye"`,
+		`not a quoted warning`,
+		`299 - "it\'s \x1b"`,
+	)
+	var got []string
+	if _, err := newWarnClient(t, srv.URL, &got).ListAliases(context.Background()); err != nil {
+		t.Fatalf("ListAliases: %v", err)
+	}
+	want := []string{`[first] is deprecated`, `say "hi" \ bye`, `not a quoted warning`, `it's x1b`}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("warnings = %q, want %q", got, want)
+	}
+}
+
+func TestWarningHeadersDeduplicated(t *testing.T) {
+	dup := `299 Elasticsearch-9.5.5-abc "same message"`
+	srv := warnServer(t, 200, dup, dup)
+	var got []string
+	c := newWarnClient(t, srv.URL, &got)
+	for range 3 {
+		if _, err := c.ListAliases(context.Background()); err != nil {
+			t.Fatalf("ListAliases: %v", err)
+		}
+	}
+	if !reflect.DeepEqual(got, []string{"same message"}) {
+		t.Errorf("warnings = %q, want one \"same message\"", got)
+	}
+}
+
+func TestWarningHeadersOnErrorResponse(t *testing.T) {
+	srv := warnServer(t, 400, `299 Elasticsearch-9.5.5-abc "bad and deprecated"`)
+	var got []string
+	if _, err := newWarnClient(t, srv.URL, &got).ListAliases(context.Background()); err == nil {
+		t.Fatal("expected an APIError for 400")
+	}
+	if !reflect.DeepEqual(got, []string{"bad and deprecated"}) {
+		t.Errorf("warnings = %q, want the 400 response's warning", got)
+	}
+}
+
+func TestWarningHeadersWithoutHandler(t *testing.T) {
+	srv := warnServer(t, 200, `299 Elasticsearch-9.5.5-abc "ignored"`)
+	if _, err := newClient(t, srv.URL, AuthConfig{}).ListAliases(context.Background()); err != nil {
+		t.Fatalf("ListAliases without OnWarning: %v", err)
+	}
+}

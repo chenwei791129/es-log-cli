@@ -103,7 +103,9 @@ func (o *globalOptions) resolveContextName() string {
 
 // buildClient resolves the active context, expands its secrets, and constructs a
 // read-only Elasticsearch client. It is used by ES-contacting commands.
-func (o *globalOptions) buildClient(cfg *config.Config) (*esclient.Client, config.Context, error) {
+// Elasticsearch deprecation warnings are reported through printer, one stderr
+// line per distinct message, prefixed "elasticsearch deprecation: ".
+func (o *globalOptions) buildClient(cfg *config.Config, printer *output.Printer) (*esclient.Client, config.Context, error) {
 	name := o.resolveContextName()
 	if name == "" {
 		return nil, config.Context{}, newExitError(exitUsage,
@@ -130,6 +132,9 @@ func (o *globalOptions) buildClient(cfg *config.Config) (*esclient.Client, confi
 		TLS: esclient.TLSConfig{
 			CACert:             expanded.TLS.CACert,
 			InsecureSkipVerify: expanded.TLS.InsecureSkipVerify,
+		},
+		OnWarning: func(msg string) {
+			printer.Warnf("elasticsearch deprecation: %s", msg)
 		},
 	})
 	if err != nil {

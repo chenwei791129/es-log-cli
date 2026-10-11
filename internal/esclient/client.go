@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,9 @@ type Config struct {
 	Server string // base URL, e.g. https://es:9200
 	Auth   AuthConfig
 	TLS    TLSConfig
+	// OnWarning, when non-nil, receives each distinct deprecation message the
+	// cluster reports in a Warning response header, once per client.
+	OnWarning func(message string)
 }
 
 // Client issues only whitelisted read requests against one cluster.
@@ -31,8 +35,11 @@ type Client struct {
 	auth       AuthConfig
 	httpClient *http.Client
 
-	mu      sync.Mutex // guards the per-run state below
-	version *Version   // cached result of Info; nil until the first success
+	onWarning func(message string)
+
+	mu       sync.Mutex          // guards the per-run state below
+	version  *Version            // cached result of Info; nil until the first success
+	warnings map[string]struct{} // warning messages already passed to onWarning
 }
 
 // New builds a Client, configuring TLS from the provided config.
@@ -50,6 +57,8 @@ func New(cfg Config) (*Client, error) {
 		base:       strings.TrimRight(cfg.Server, "/"),
 		auth:       cfg.Auth,
 		httpClient: &http.Client{Transport: transport},
+		onWarning:  cfg.OnWarning,
+		warnings:   map[string]struct{}{},
 	}, nil
 }
 
@@ -112,6 +121,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	c.reportWarnings(resp.Header.Values("Warning"))
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -127,6 +137,50 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 		}
 	}
 	return data, nil
+}
+
+// warnText matches the first quoted string of a Warning header value, honouring
+// backslash escapes.
+var warnText = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
+// reportWarnings passes each distinct Warning header message to onWarning the
+// first time it is seen. Elasticsearch sends RFC 7234 values such as
+// 299 Elasticsearch-9.5.5-<hash> "message text"; only the unescaped quoted
+// text is reported, falling back to the raw value when it cannot be parsed.
+func (c *Client) reportWarnings(values []string) {
+	if c.onWarning == nil {
+		return
+	}
+	for _, raw := range values {
+		msg := warningMessage(raw)
+		c.mu.Lock()
+		_, seen := c.warnings[msg]
+		c.warnings[msg] = struct{}{}
+		c.mu.Unlock()
+		if !seen {
+			c.onWarning(msg)
+		}
+	}
+}
+
+// warningMessage extracts the quoted warn-text from one Warning header value,
+// returning the raw value when no quoted string is present. Escapes follow the
+// RFC 7230 quoted-pair rule: a backslash makes the next character literal, so
+// sequences such as \x1b are never decoded into control characters.
+func warningMessage(raw string) string {
+	m := warnText.FindString(raw)
+	if m == "" {
+		return raw
+	}
+	var b strings.Builder
+	inner := m[1 : len(m)-1]
+	for i := 0; i < len(inner); i++ {
+		if inner[i] == '\\' && i+1 < len(inner) {
+			i++
+		}
+		b.WriteByte(inner[i])
+	}
+	return b.String()
 }
 
 // parseError extracts error.type and the deepest available root-cause reason from

@@ -76,7 +76,7 @@ func runLs(cmd *cobra.Command, opts *globalOptions, mode string, showHidden bool
 	if err != nil {
 		return err
 	}
-	client, _, err := opts.buildClient(cfg)
+	client, _, err := opts.buildClient(cfg, opts.printer(cmd))
 	if err != nil {
 		return err
 	}
