@@ -6,8 +6,8 @@ endpoints — it is impossible to trigger destructive operations (`DELETE`,
 `_rollover`, `_reindex`, ILM, etc.) through it. Output defaults to JSONL for easy
 `jq`/pipe consumption, with layered exit codes for reliable scripting.
 
-Designed for AI agents first, humans and CI second. Tested in CI against
-Elasticsearch 8.19 and 9.5; see [Compatibility](#compatibility).
+Designed for AI agents first, humans and CI second. Tested in CI against a
+support matrix of Elasticsearch majors; see [Compatibility](#compatibility).
 
 ## Features
 
