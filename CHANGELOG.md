@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0](https://github.com/chenwei791129/es-log-cli/compare/v1.2.0...v1.3.0) (2026-10-11)
+
+
+### Features
+
+* **esclient:** replace Ping with Info and report server version ([9d140c8](https://github.com/chenwei791129/es-log-cli/commit/9d140c81004a961a53703b8c3d05872870de0cf5))
+* surface Elasticsearch deprecation warnings ([b0f2fd4](https://github.com/chenwei791129/es-log-cli/commit/b0f2fd4c2668b1016ce2dbe9e0bbb5c9eefc0935))
+
 ## [1.2.0](https://github.com/chenwei791129/es-log-cli/compare/v1.1.0...v1.2.0) (2026-06-29)
 
 
