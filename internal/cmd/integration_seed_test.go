@@ -40,6 +40,9 @@ func seedMappings(levelType string) map[string]any {
 // seeded describes the fixtures created for one integration run.
 type seeded struct {
 	prefix string
+	// errorHits is the number of level:error docs across <p>-logs-a and
+	// <p>-logs-b, i.e. what a level:error search on the alias must return.
+	errorHits int
 	// bytesByService is the expected sum of bytes per service across
 	// <p>-logs-a and <p>-logs-b.
 	bytesByService map[string]int
@@ -109,6 +112,7 @@ func seedCluster(t *testing.T, base string) seeded {
 			level := "info"
 			if i%2 == 0 {
 				level = "error"
+				s.errorHits++
 			}
 			service := "checkout"
 			if i >= seedPerIndex/2 {

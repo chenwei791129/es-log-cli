@@ -103,15 +103,15 @@ func TestIntegration(t *testing.T) {
 	t.Run("search hits", func(t *testing.T) {
 		res := run(t, "search", "-t", s.logs(), "-q", "level:error", "--since", "1h")
 		wantExit(t, res, 0)
-		if n := countLines(res.stdout); n != seedPerIndex {
-			t.Errorf("jsonl lines = %d, want %d", n, seedPerIndex)
+		if n := countLines(res.stdout); n != s.errorHits {
+			t.Errorf("jsonl lines = %d, want %d", n, s.errorHits)
 		}
 		res = run(t, "search", "-t", s.logs(), "-q", "level:error", "--since", "1h", "-o", "json")
 		wantExit(t, res, 0)
 		var doc searchJSON
 		decodeJSON(t, res.stdout, &doc)
-		if doc.Total != seedPerIndex {
-			t.Errorf("total = %d, want %d", doc.Total, seedPerIndex)
+		if doc.Total != s.errorHits {
+			t.Errorf("total = %d, want %d", doc.Total, s.errorHits)
 		}
 	})
 
