@@ -18,7 +18,7 @@ test: ## Run all tests
 	go test ./...
 
 lint: ## Run golangci-lint via the project-pinned tool dependency
-	go tool golangci-lint run
+	go tool golangci-lint run --build-tags integration
 
 fmt: ## Format all Go source files
 	go fmt ./...

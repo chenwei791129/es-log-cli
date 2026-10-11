@@ -1,0 +1,50 @@
+name: Integration
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Support matrix: the latest patch of every Elasticsearch major that is
+        # still supported by Elastic. Bump by hand when a new minor ships; drop
+        # a major when Elastic ends its support. Tags are pinned on purpose.
+        es: ["8.19.23", "9.5.5"]
+    services:
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:${{ matrix.es }}
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: -Xms1g -Xmx1g
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -sf
+          http://localhost:9200/_cluster/health?wait_for_status=yellow"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Run integration tests against Elasticsearch ${{ matrix.es }}
+        env:
+          ES_LOG_TEST_URL: http://localhost:9200
+          ES_LOG_TEST_EXPECT_VERSION: ${{ matrix.es }}
+        run: go test -count=1 -tags integration ./...
