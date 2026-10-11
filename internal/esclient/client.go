@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Config configures a read-only client.
@@ -29,6 +30,9 @@ type Client struct {
 	base       string
 	auth       AuthConfig
 	httpClient *http.Client
+
+	mu      sync.Mutex // guards the per-run state below
+	version *Version   // cached result of Info; nil until the first success
 }
 
 // New builds a Client, configuring TLS from the provided config.
@@ -190,11 +194,59 @@ func shardElementReason(elem json.RawMessage) string {
 	return ""
 }
 
-// Ping issues GET /_cluster/health, reporting an error on connection failure or
-// rejected authentication.
-func (c *Client) Ping(ctx context.Context) error {
-	_, err := c.do(ctx, http.MethodGet, "/_cluster/health", nil)
-	return err
+// Version is the server version reported by the node that answered GET /.
+// Zero values mean the version could not be determined; callers must treat
+// that as "unknown", never as an error.
+type Version struct {
+	Number       string // raw version.number, "" when absent or unparseable
+	Major        int    // leading component of Number, 0 when unknown
+	Distribution string // "" for Elasticsearch; e.g. "opensearch"
+}
+
+// Info issues GET / and returns the server version. The result is cached on
+// the client after the first successful call. Connection failures and non-2xx
+// responses are returned as errors; a 2xx body whose version cannot be parsed
+// yields the zero Version and a nil error, because the request has already
+// proven connectivity and authentication.
+func (c *Client) Info(ctx context.Context) (Version, error) {
+	c.mu.Lock()
+	cached := c.version
+	c.mu.Unlock()
+	if cached != nil {
+		return *cached, nil
+	}
+	data, err := c.do(ctx, http.MethodGet, "/", nil)
+	if err != nil {
+		return Version{}, err
+	}
+	v := parseVersion(data)
+	c.mu.Lock()
+	c.version = &v
+	c.mu.Unlock()
+	return v, nil
+}
+
+// parseVersion extracts version.number and version.distribution from a GET /
+// body. Major is the leading dot-separated component of the number, tolerating
+// suffixes such as "-SNAPSHOT"; it stays 0 when that component is not numeric.
+// A malformed body yields the zero Version.
+func parseVersion(data []byte) Version {
+	var body struct {
+		Version struct {
+			Number       string `json:"number"`
+			Distribution string `json:"distribution"`
+		} `json:"version"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		return Version{}
+	}
+	v := Version{Number: body.Version.Number, Distribution: body.Version.Distribution}
+	head, _, _ := strings.Cut(v.Number, ".")
+	head, _, _ = strings.Cut(head, "-")
+	if n, err := strconv.Atoi(head); err == nil && n > 0 {
+		v.Major = n
+	}
+	return v
 }
 
 // AliasEntry is one alias returned by ListAliases.

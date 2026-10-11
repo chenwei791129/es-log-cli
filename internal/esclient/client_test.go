@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -143,22 +144,66 @@ func TestTLSCustomCA(t *testing.T) {
 	}
 }
 
-func TestPing(t *testing.T) {
-	var reqs []captured
-	srv := newStub(t, 200, `{"status":"green"}`, &reqs)
-	defer srv.Close()
-	if err := newClient(t, srv.URL, AuthConfig{}).Ping(context.Background()); err != nil {
-		t.Fatalf("Ping healthy: %v", err)
+func TestInfo(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want Version
+	}{
+		{"elasticsearch", `{"name":"n1","version":{"number":"9.5.5","build_flavor":"default"}}`,
+			Version{Number: "9.5.5", Major: 9}},
+		{"distribution", `{"version":{"number":"2.11.0","distribution":"opensearch"}}`,
+			Version{Number: "2.11.0", Major: 2, Distribution: "opensearch"}},
+		{"snapshot suffix", `{"version":{"number":"10-SNAPSHOT"}}`,
+			Version{Number: "10-SNAPSHOT", Major: 10}},
+		{"non-numeric major", `{"version":{"number":"main"}}`,
+			Version{Number: "main"}},
+		{"missing version", `{"tagline":"You Know, for Search"}`, Version{}},
+		{"malformed json", `not json`, Version{}},
 	}
-	if reqs[0].method != http.MethodGet || reqs[0].path != "/_cluster/health" {
-		t.Errorf("got %s %s, want GET /_cluster/health", reqs[0].method, reqs[0].path)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var reqs []captured
+			srv := newStub(t, 200, tc.body, &reqs)
+			defer srv.Close()
+			got, err := newClient(t, srv.URL, AuthConfig{}).Info(context.Background())
+			if err != nil {
+				t.Fatalf("Info: %v (a 2xx must never be an error)", err)
+			}
+			if got != tc.want {
+				t.Errorf("Info = %+v, want %+v", got, tc.want)
+			}
+			if reqs[0].method != http.MethodGet || reqs[0].path != "/" {
+				t.Errorf("got %s %s, want GET /", reqs[0].method, reqs[0].path)
+			}
+		})
 	}
+}
 
-	var reqs2 []captured
-	bad := newStub(t, 401, `{"error":"unauthorized"}`, &reqs2)
-	defer bad.Close()
-	if err := newClient(t, bad.URL, AuthConfig{}).Ping(context.Background()); err == nil {
-		t.Error("Ping should fail on auth rejection")
+func TestInfoAuthRejected(t *testing.T) {
+	var reqs []captured
+	srv := newStub(t, 401, `{"error":{"type":"security_exception"}}`, &reqs)
+	defer srv.Close()
+	_, err := newClient(t, srv.URL, AuthConfig{}).Info(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 401 {
+		t.Fatalf("Info error = %v, want *APIError with status 401", err)
+	}
+}
+
+func TestInfoCached(t *testing.T) {
+	var reqs []captured
+	srv := newStub(t, 200, `{"version":{"number":"8.19.23"}}`, &reqs)
+	defer srv.Close()
+	c := newClient(t, srv.URL, AuthConfig{})
+	for range 3 {
+		v, err := c.Info(context.Background())
+		if err != nil || v.Number != "8.19.23" {
+			t.Fatalf("Info = %+v, %v", v, err)
+		}
+	}
+	if len(reqs) != 1 {
+		t.Errorf("Info issued %d requests, want 1 (cached)", len(reqs))
 	}
 }
 
@@ -368,7 +413,7 @@ func TestGetMappingTypeConflict(t *testing.T) {
 // TestReadOnlyWhitelistLock enumerates the client's exported methods and asserts
 // the set is exactly the read-only whitelist with no generic request method.
 func TestReadOnlyWhitelistLock(t *testing.T) {
-	want := []string{"GetMapping", "GetMaxResultWindow", "ListAliases", "ListDataStreams", "Ping", "Search"}
+	want := []string{"GetMapping", "GetMaxResultWindow", "Info", "ListAliases", "ListDataStreams", "Search"}
 
 	var got []string
 	ct := reflect.TypeFor[*Client]()
@@ -398,7 +443,7 @@ func TestOnlyWhitelistedRequestsIssued(t *testing.T) {
 
 	c := newClient(t, srv.URL, AuthConfig{})
 	ctx := context.Background()
-	_ = c.Ping(ctx)
+	_, _ = c.Info(ctx)
 	_, _ = c.ListAliases(ctx)
 	_, _ = c.ListDataStreams(ctx)
 	_, _, _ = c.GetMaxResultWindow(ctx, "app-logs")
@@ -407,7 +452,7 @@ func TestOnlyWhitelistedRequestsIssued(t *testing.T) {
 
 	whitelisted := func(r captured) bool {
 		switch {
-		case r.method == http.MethodGet && r.path == "/_cluster/health",
+		case r.method == http.MethodGet && r.path == "/",
 			r.method == http.MethodGet && r.path == "/_alias",
 			r.method == http.MethodGet && r.path == "/_data_stream",
 			r.method == http.MethodGet && r.path == "/app-logs/_settings/index.max_result_window",
