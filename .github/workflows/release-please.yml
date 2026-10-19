@@ -16,17 +16,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Shared workflow: the pinned release-please SHA is maintained in
+  # chenwei791129/.github for every repository.
   release-please:
-    runs-on: ubuntu-26.04
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-    steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        id: release
-        with:
-          release-type: go
-          token: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    uses: chenwei791129/.github/.github/workflows/release-please.yml@main
+    with:
+      release-type: go
 
   build-and-upload:
     needs: release-please
